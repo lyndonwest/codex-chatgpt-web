@@ -591,6 +591,68 @@ test("effort selection waits for an already-open menu to hydrate instead of clos
   ]);
 });
 
+test("effort selection supports the slider-based ChatGPT control", async () => {
+  let sliderValue = 3;
+  const trustedKeys = [];
+  const inputEvents = [];
+  const fixture = {
+    pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    pressTrustedBrowserKey: BrowserHost.prototype.pressTrustedBrowserKey,
+    waitForEffortControl: async () => ({ found: true, expanded: "true" }),
+    readEffortMenu: async () => ({
+      open: true,
+      count: 5,
+      target: null,
+      slider: { min: 0, max: 4, value: sliderValue },
+    }),
+    waitForEffortMenu: BrowserHost.prototype.waitForEffortMenu,
+    openEffortMenu: async () => {
+      throw new Error("must not toggle an already-open slider");
+    },
+    chooseEffortSlider: BrowserHost.prototype.chooseEffortSlider,
+    focusEffortSlider: async () => true,
+    dispatchTrustedKey: async ({ key }) => {
+      trustedKeys.push(key);
+      if (key === "ArrowLeft") sliderValue -= 1;
+      if (key === "ArrowRight") sliderValue += 1;
+    },
+    view: {
+      webContents: {
+        debugger: {},
+        sendInputEvent: event => inputEvents.push(event),
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.selectHighEffort.call(fixture, {
+    readyTimeoutMs: 100,
+    optionTimeoutMs: 100,
+    confirmTimeoutMs: 100,
+    pollMs: 1,
+  });
+
+  assert.deepEqual(result, { effort: "High", changed: true });
+  assert.deepEqual(trustedKeys, ["ArrowLeft"]);
+  assert.deepEqual(inputEvents, [
+    { type: "keyDown", keyCode: "Escape" },
+    { type: "keyUp", keyCode: "Escape" },
+  ]);
+});
+
+test("effort slider selection rejects unsafe ranges before dispatching input", async () => {
+  const invalidStates = [
+    { min: 0, max: 4, value: 9 },
+    { min: 0, max: 5, value: 3 },
+    { min: Number.NaN, max: 4, value: 3 },
+  ];
+  for (const slider of invalidStates) {
+    await assert.rejects(
+      BrowserHost.prototype.chooseEffortSlider.call({}, 2, { slider }),
+      /safe integer range and current value/,
+    );
+  }
+});
+
 test("smoke submission focuses the send button before trusted Enter and waits for an accepted user turn", async () => {
   const keys = [];
   let sendReads = 0;

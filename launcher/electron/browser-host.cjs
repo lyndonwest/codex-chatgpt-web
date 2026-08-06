@@ -43,6 +43,13 @@ const EFFORT_MENU_SELECTOR = [
   '[role="menu"]:has([role="menuitemradio"])',
   '[role="group"]:has([role="menuitemradio"])',
 ].join(", ");
+const EFFORT_SLIDER_ROOT_SELECTOR = [
+  '[data-testid="composer-intelligence-picker-content"]:has([data-model-reasoning-effort-slider])',
+  '[role="menu"]:has([data-model-reasoning-effort-slider])',
+  '[role="group"]:has([data-model-reasoning-effort-slider])',
+].join(", ");
+const EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+const EFFORT_SLIDER_MAX_OPTIONS = 5;
 const COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
 const ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
@@ -1280,6 +1287,7 @@ class BrowserHost {
         const roots = [
           ...(controlled ? [controlled] : []),
           ...Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_MENU_SELECTOR)})),
+          ...Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_SLIDER_ROOT_SELECTOR)})),
         ];
         const candidates = [...new Set(roots)].filter(visible).map((menu) => ({
           menu,
@@ -1288,8 +1296,41 @@ class BrowserHost {
           .sort((left, right) => right.items.length - left.items.length);
         const candidate = candidates[0];
         const target = candidate?.items[targetIndex];
+        const slider = [...new Set(roots.flatMap(root => (
+          root.matches(${JSON.stringify(EFFORT_SLIDER_SELECTOR)})
+            ? [root]
+            : Array.from(root.querySelectorAll(${JSON.stringify(EFFORT_SLIDER_SELECTOR)}))
+        )))].filter(visible).at(-1);
+        const sliderControl = slider?.closest('[role="menuitem"]');
+        if (!target && slider && sliderControl && visible(sliderControl)) {
+          const parseIntegerAttribute = (raw) => {
+            if (raw === null || !/^-?\\d+$/.test(raw)) return null;
+            const parsed = Number(raw);
+            return Number.isSafeInteger(parsed) ? parsed : null;
+          };
+          const min = parseIntegerAttribute(slider.getAttribute('aria-valuemin'));
+          const max = parseIntegerAttribute(slider.getAttribute('aria-valuemax'));
+          const value = parseIntegerAttribute(slider.getAttribute('aria-valuenow'));
+          const optionCount = min === null || max === null ? 0 : max - min + 1;
+          const sliderState = min !== null
+            && max !== null
+            && value !== null
+            && Number.isSafeInteger(optionCount)
+            && optionCount >= 1
+            && optionCount <= ${EFFORT_SLIDER_MAX_OPTIONS}
+            && value >= min
+            && value <= max
+            ? { min, max, value }
+            : null;
+          return {
+            open: true,
+            count: sliderState ? optionCount : 0,
+            target: null,
+            slider: sliderState,
+          };
+        }
         if (!candidate || !target) {
-          return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null };
+          return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null, slider: null };
         }
         const rect = target.getBoundingClientRect();
         return {
@@ -1300,6 +1341,7 @@ class BrowserHost {
             checked: target.getAttribute('aria-checked'),
             point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
           },
+          slider: null,
         };
       })()`);
   }
@@ -1329,12 +1371,59 @@ class BrowserHost {
     await this.clickTrustedBrowserPoint(menu.target.point);
   }
 
+  async focusEffortSlider() {
+    return await this.evaluateBrowserPage(`(() => {
+      /* effort-slider-focus */
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const sliders = Array.from(document.querySelectorAll(${JSON.stringify(EFFORT_SLIDER_SELECTOR)}))
+        .filter(visible);
+      const control = sliders.at(-1)?.closest('[role="menuitem"]');
+      if (!control || !visible(control)) return false;
+      control.focus({ preventScroll: true });
+      return document.activeElement === control;
+    })()`);
+  }
+
+  async chooseEffortSlider(targetIndex, knownMenu) {
+    const menu = knownMenu?.slider ? knownMenu : await this.readEffortMenu(targetIndex);
+    const slider = menu.slider;
+    const optionCount = slider ? slider.max - slider.min + 1 : 0;
+    if (!slider
+      || ![slider.min, slider.max, slider.value, optionCount].every(Number.isSafeInteger)
+      || optionCount < 1
+      || optionCount > EFFORT_SLIDER_MAX_OPTIONS
+      || slider.value < slider.min
+      || slider.value > slider.max) {
+      throw new Error("ChatGPT effort slider did not expose a safe integer range and current value");
+    }
+    const targetValue = slider.min + targetIndex;
+    if (targetIndex < 0 || targetValue > slider.max) {
+      throw new Error(
+        `ChatGPT effort slider does not expose item index ${targetIndex}`
+        + ` (min=${slider.min}; max=${slider.max})`,
+      );
+    }
+    if (slider.value === targetValue) return false;
+    if (!await this.focusEffortSlider()) {
+      throw new Error("ChatGPT effort slider could not receive focus");
+    }
+    const key = targetValue > slider.value ? "ArrowRight" : "ArrowLeft";
+    for (let value = slider.value; value !== targetValue; value += key === "ArrowRight" ? 1 : -1) {
+      await this.pressTrustedBrowserKey(key);
+    }
+    return true;
+  }
+
   async waitForEffortMenu(targetIndex, timeoutMs, pollMs) {
     const deadline = Date.now() + timeoutMs;
     let menu;
     do {
       menu = await this.readEffortMenu(targetIndex);
-      if (menu.target) return menu;
+      if (menu.target || menu.slider) return menu;
       await sleep(pollMs);
     } while (Date.now() < deadline);
     throw new Error(
@@ -1356,6 +1445,23 @@ class BrowserHost {
       menu = menu.open || control.expanded === "true"
         ? await this.waitForEffortMenu(targetIndex, optionTimeoutMs, pollMs)
         : await this.openEffortMenu(targetIndex, optionTimeoutMs, pollMs, control);
+    }
+    if (menu.slider) {
+      const changed = await this.chooseEffortSlider(targetIndex, menu);
+      const deadline = Date.now() + confirmTimeoutMs;
+      let confirmed = menu;
+      do {
+        confirmed = await this.readEffortMenu(targetIndex);
+        if (confirmed.slider && confirmed.slider.value === confirmed.slider.min + targetIndex) {
+          this.pressBrowserKey("Escape");
+          return { effort: "High", changed };
+        }
+        await sleep(pollMs);
+      } while (Date.now() < deadline);
+      throw new Error(
+        `ChatGPT did not confirm effort slider index ${targetIndex}`
+        + ` (aria-valuenow=${JSON.stringify(confirmed?.slider?.value ?? null)})`,
+      );
     }
     if (menu.target.checked !== "true" && menu.target.checked !== "false") {
       throw new Error(`ChatGPT effort item index ${targetIndex} has no semantic checked state`);

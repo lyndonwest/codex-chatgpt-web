@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
 import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
+import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
@@ -478,7 +479,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   expect(workerSource).not.toContain('aria-label^="Remove file "');
 });
 
-test("effort selection uses structural menu indices instead of localized labels", () => {
+test("effort selection supports structural menu and slider indices instead of localized labels", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
@@ -488,13 +489,30 @@ test("effort selection uses structural menu indices instead of localized labels"
   expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"])');
   expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"])');
   expect(sessionSource).toContain('[role="menuitemradio"]');
+  expect(sessionSource).toContain('[data-model-reasoning-effort-slider] [role="slider"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
+  expect(workerSource).toContain('getAttribute("aria-valuenow")');
+  expect(workerSource).toContain('sliderControl.press(key)');
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
+});
+
+test("effort slider ARIA state fails closed on malformed or unsafe ranges", () => {
+  expect(parseChatGptEffortSliderState("0", "4", "3")).toEqual({ min: 0, max: 4, value: 3 });
+  for (const attributes of [
+    [null, "4", "3"],
+    ["", "4", "3"],
+    ["0", "4", null],
+    ["0", "4", "9"],
+    ["0", "5", "3"],
+    ["9007199254740992", "9007199254740993", "9007199254740992"],
+  ] as const) {
+    expect(parseChatGptEffortSliderState(attributes[0], attributes[1], attributes[2])).toBeNull();
+  }
 });
 
 test("effort selection handles the known ChatGPT rate-limit dialog before trusted pointer activation", () => {

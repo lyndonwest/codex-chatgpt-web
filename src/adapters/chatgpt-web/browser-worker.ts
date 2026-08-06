@@ -18,9 +18,11 @@ import {
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
+  CHATGPT_EFFORT_SLIDER_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
+  parseChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
@@ -799,13 +801,65 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("effort-menu-open-requested");
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
+    const effortSlider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
     const waitAbort = new AbortController();
     try {
       const ready = await Promise.race([
         effortChoice.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "effort" as const),
+        effortSlider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "slider" as const),
         chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
+      if (ready === "slider") {
+        await captureDiagnostic?.("effort-slider-visible");
+        const sliderState = parseChatGptEffortSliderState(
+          await effortSlider.getAttribute("aria-valuemin"),
+          await effortSlider.getAttribute("aria-valuemax"),
+          await effortSlider.getAttribute("aria-valuenow"),
+        );
+        if (!sliderState) {
+          throw new Error("ChatGPT effort slider did not expose a safe integer range and current value");
+        }
+        const { min, max } = sliderState;
+        let current = sliderState.value;
+        const target = min + mode.uiEffortIndex;
+        if (mode.uiEffortIndex < 0 || target > max) {
+          throw new Error(
+            `ChatGPT effort slider does not expose item index ${mode.uiEffortIndex}`
+            + ` (min=${min}; max=${max})`,
+          );
+        }
+        if (current !== target) {
+          const sliderControl = effortSlider.locator('xpath=ancestor::*[@role="menuitem"][1]');
+          await sliderControl.waitFor({ state: "visible", timeout: 5_000 });
+          await sliderControl.focus();
+          const key = target > current ? "ArrowRight" : "ArrowLeft";
+          while (current !== target) {
+            await sliderControl.press(key);
+            current += key === "ArrowRight" ? 1 : -1;
+          }
+          const deadline = Date.now() + 40_000;
+          let confirmedState = sliderState;
+          while (Date.now() < deadline) {
+            confirmedState = parseChatGptEffortSliderState(
+              await effortSlider.getAttribute("aria-valuemin"),
+              await effortSlider.getAttribute("aria-valuemax"),
+              await effortSlider.getAttribute("aria-valuenow"),
+            ) ?? sliderState;
+            if (confirmedState.min === min && confirmedState.max === max && confirmedState.value === target) break;
+            await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+          }
+          if (confirmedState.min !== min || confirmedState.max !== max || confirmedState.value !== target) {
+            throw new Error(
+              `ChatGPT did not confirm effort slider index ${mode.uiEffortIndex}`
+              + ` (aria-valuenow=${JSON.stringify(confirmedState.value)})`,
+            );
+          }
+        }
+        await captureDiagnostic?.("effort-selected");
+        await page.keyboard.press("Escape");
+        return mode;
+      }
       await captureDiagnostic?.("effort-choice-visible");
     } catch (error) {
       if (error instanceof ChatGptWebAdapterError) throw error;
