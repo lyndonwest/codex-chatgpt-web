@@ -57,10 +57,25 @@ export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
+export const CHATGPT_OPERATIONAL_VIEWPORT = { width: 1100, height: 720 } as const;
 
 const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
+
+export async function ensureChatGptOperationalViewport(page: Page): Promise<void> {
+  const readViewport = () => page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  let viewport = await readViewport();
+  if (viewport.width > 1 && viewport.height > 1) return;
+  await page.setViewportSize(CHATGPT_OPERATIONAL_VIEWPORT);
+  viewport = await readViewport();
+  if (viewport.width <= 1 || viewport.height <= 1) {
+    throw new Error(
+      `ChatGPT browser surface remained unusable after viewport recovery`
+      + ` (width=${viewport.width}; height=${viewport.height})`,
+    );
+  }
+}
 
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
@@ -1477,6 +1492,7 @@ export class ChatGptBrowserWorker {
         return connection.page;
       });
       if (!launcherSurfaceId) managedPage = page;
+      if (launcherSurfaceId) await ensureChatGptOperationalViewport(page);
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(

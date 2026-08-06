@@ -1542,7 +1542,37 @@ class BrowserHost {
   }
 
   async inspectSession(detectPro = false) {
-    return await this.withManualOperation("session inspection", () => this.runSessionInspection(detectPro));
+    return await this.withManualOperation("session inspection", () => detectPro
+      ? this.withInteractiveHomeView(() => this.runSessionInspection(true))
+      : this.runSessionInspection(false));
+  }
+
+  async withInteractiveHomeView(action) {
+    if (browserViewVisible(this.visible, this.surfaceActive, this.boundsReady)) {
+      return await action();
+    }
+    const originalBounds = { ...this.bounds };
+    const [contentWidth, contentHeight] = this.boundsReady
+      ? [originalBounds.width, originalBounds.height]
+      : this.window.getContentSize();
+    const interactiveBounds = this.boundsReady
+      ? originalBounds
+      : { x: 0, y: 0, width: contentWidth, height: contentHeight };
+    const resize = () => this.view.webContents
+      .executeJavaScript("window.dispatchEvent(new Event('resize'))", true)
+      .catch(() => {});
+    this.view.setBounds(interactiveBounds);
+    this.view.setVisible(true);
+    try {
+      await resize();
+      await sleep(50);
+      return await action();
+    } finally {
+      this.view.setVisible(false);
+      this.view.setBounds(originalBounds);
+      this.syncViewVisibility();
+      await resize();
+    }
   }
 
   async runSessionInspection(detectPro = false) {
@@ -1562,10 +1592,18 @@ class BrowserHost {
     if (detectPro) {
       const control = await this.waitForEffortControl(30_000, 200);
       let menu = await this.readEffortMenu(0);
-      if (!menu.target) {
-        menu = menu.open || control.expanded === "true"
-          ? await this.waitForEffortMenu(0, 70_000, 200)
-          : await this.openEffortMenu(0, 70_000, 200, control);
+      if (!menu.target && !menu.slider) {
+        if (menu.open) {
+          menu = await this.waitForEffortMenu(0, 70_000, 200);
+        } else {
+          let activationControl = control;
+          if (control.expanded === "true") {
+            this.pressBrowserKey("Escape");
+            await sleep(200);
+            activationControl = { ...control, expanded: "false" };
+          }
+          menu = await this.openEffortMenu(0, 70_000, 200, activationControl);
+        }
       }
       proAvailable = menu.count >= 5;
       this.pressBrowserKey("Escape");

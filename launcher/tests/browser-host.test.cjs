@@ -173,6 +173,119 @@ test("session inspection navigates an authenticated ordinary chat surface to Tem
   });
 });
 
+test("session inspection detects Pro capability from the slider-based effort control", async () => {
+  const inputEvents = [];
+  const openedControls = [];
+  const fixture = {
+    pressBrowserKey: BrowserHost.prototype.pressBrowserKey,
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+        sendInputEvent: event => inputEvents.push(event),
+      },
+    },
+    probeAuthentication: async () => ({ authenticated: true }),
+    waitForEffortControl: async () => ({ found: true, expanded: "true" }),
+    readEffortMenu: async () => ({
+      open: false,
+      count: 0,
+      target: null,
+      slider: null,
+    }),
+    openEffortMenu: async (_targetIndex, _timeoutMs, _pollMs, control) => {
+      openedControls.push(control);
+      return {
+        open: true,
+        count: 5,
+        target: null,
+        slider: { min: 0, max: 4, value: 2 },
+      };
+    },
+  };
+
+  const inspected = await BrowserHost.prototype.runSessionInspection.call(fixture, true);
+
+  assert.deepEqual(inspected, {
+    authenticated: true,
+    temporary: true,
+    url: "https://chatgpt.com/?temporary-chat=true",
+    proAvailable: true,
+  });
+  assert.deepEqual(openedControls, [{ found: true, expanded: "false" }]);
+  assert.deepEqual(inputEvents, [
+    { type: "keyDown", keyCode: "Escape" },
+    { type: "keyUp", keyCode: "Escape" },
+    { type: "keyDown", keyCode: "Escape" },
+    { type: "keyUp", keyCode: "Escape" },
+  ]);
+});
+
+test("hidden capability inspection stages the home view with usable bounds", async () => {
+  const events = [];
+  const originalBounds = { x: 240, y: 120, width: 960, height: 640 };
+  const fixture = {
+    visible: true,
+    surfaceActive: false,
+    boundsReady: true,
+    bounds: originalBounds,
+    view: {
+      setBounds: bounds => events.push(["bounds", bounds]),
+      setVisible: visible => events.push(["visible", visible]),
+      webContents: {
+        executeJavaScript: async () => events.push(["resize"]),
+      },
+    },
+    syncViewVisibility: () => events.push(["sync"]),
+  };
+
+  const result = await BrowserHost.prototype.withInteractiveHomeView.call(fixture, async () => {
+    events.push(["inspect"]);
+    return "ok";
+  });
+
+  assert.equal(result, "ok");
+  assert.deepEqual(events, [
+    ["bounds", originalBounds],
+    ["visible", true],
+    ["resize"],
+    ["inspect"],
+    ["visible", false],
+    ["bounds", originalBounds],
+    ["sync"],
+    ["resize"],
+  ]);
+});
+
+test("hidden capability inspection derives bounds after a launcher restart", async () => {
+  const events = [];
+  const fixture = {
+    visible: false,
+    surfaceActive: false,
+    boundsReady: false,
+    bounds: { x: 0, y: 0, width: 1, height: 1 },
+    window: { getContentSize: () => [1100, 720] },
+    view: {
+      setBounds: bounds => events.push(["bounds", bounds]),
+      setVisible: visible => events.push(["visible", visible]),
+      webContents: { executeJavaScript: async () => {} },
+    },
+    syncViewVisibility: () => events.push(["sync"]),
+  };
+
+  await BrowserHost.prototype.withInteractiveHomeView.call(fixture, async () => {
+    events.push(["inspect"]);
+  });
+
+  assert.deepEqual(events, [
+    ["bounds", { x: 0, y: 0, width: 1100, height: 720 }],
+    ["visible", true],
+    ["inspect"],
+    ["visible", false],
+    ["bounds", { x: 0, y: 0, width: 1, height: 1 }],
+    ["sync"],
+  ]);
+});
+
 test("browser surface reactivation preserves its last measured bounds", () => {
   const visibility = [];
   const fixture = {

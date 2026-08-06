@@ -85,6 +85,36 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
   assert.equal(detached(), true);
 });
 
+test("trusted effort slider arrows are dispatched through the owned Electron WebContents target", async () => {
+  for (const [key, virtualKeyCode] of [["ArrowLeft", 37], ["ArrowRight", 39]]) {
+    const { client, commands, detached } = createDebugger();
+    await dispatchTrustedKey({ debuggerClient: client, key });
+    assert.deepEqual(commands, [
+      {
+        method: "Input.dispatchKeyEvent",
+        params: {
+          type: "keyDown",
+          key,
+          code: key,
+          windowsVirtualKeyCode: virtualKeyCode,
+          nativeVirtualKeyCode: virtualKeyCode,
+        },
+      },
+      {
+        method: "Input.dispatchKeyEvent",
+        params: {
+          type: "keyUp",
+          key,
+          code: key,
+          windowsVirtualKeyCode: virtualKeyCode,
+          nativeVirtualKeyCode: virtualKeyCode,
+        },
+      },
+    ]);
+    assert.equal(detached(), true);
+  }
+});
+
 test("trusted pointer activation is dispatched at the resolved DOM point", async () => {
   const { client, commands, detached } = createDebugger();
   await dispatchTrustedClick({

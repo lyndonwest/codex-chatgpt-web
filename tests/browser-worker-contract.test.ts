@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, ensureChatGptOperationalViewport, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 
@@ -103,6 +103,19 @@ test("browser stage timeout aborts late page acquisition", async () => {
 
   await expect(result).rejects.toThrow("ChatGPT browser stage timed out: browser_page");
   expect(acquisitionAborted).toBeTrue();
+});
+
+test("launcher turns expand a one-pixel hidden surface before browser interaction", async () => {
+  const sizes = [{ width: 1, height: 1 }, { width: 1100, height: 720 }];
+  const applied: Array<{ width: number; height: number }> = [];
+  const page = {
+    evaluate: async () => sizes.shift(),
+    setViewportSize: async (size: { width: number; height: number }) => applied.push(size),
+  } as unknown as Page;
+
+  await ensureChatGptOperationalViewport(page);
+
+  expect(applied).toEqual([{ width: 1100, height: 720 }]);
 });
 
 test("closing the launcher page is an immediate terminal turn error", async () => {

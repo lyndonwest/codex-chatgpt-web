@@ -12,21 +12,22 @@ async function withWebContentsDebugger(debuggerClient, action) {
 }
 
 async function dispatchTrustedKey({ debuggerClient, key }) {
-  if (key !== "Enter") {
-    throw new Error(`Unsupported CDP key: ${String(key)}`);
-  }
+  const virtualKeyCode = key === "Enter" ? 13
+    : key === "ArrowLeft" ? 37
+      : key === "ArrowRight" ? 39
+        : undefined;
+  if (virtualKeyCode === undefined) throw new Error(`Unsupported CDP key: ${String(key)}`);
   const event = {
-    key: "Enter",
-    code: "Enter",
-    windowsVirtualKeyCode: 13,
-    nativeVirtualKeyCode: 13,
+    key,
+    code: key,
+    windowsVirtualKeyCode: virtualKeyCode,
+    nativeVirtualKeyCode: virtualKeyCode,
   };
   await withWebContentsDebugger(debuggerClient, async (sendCommand) => {
     await sendCommand("Input.dispatchKeyEvent", {
       ...event,
       type: "keyDown",
-      text: "\r",
-      unmodifiedText: "\r",
+      ...(key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : {}),
     });
     await sendCommand("Input.dispatchKeyEvent", {
       ...event,
