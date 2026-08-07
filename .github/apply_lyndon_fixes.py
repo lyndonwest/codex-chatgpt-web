@@ -129,8 +129,14 @@ replace_once(
 
 replace_once(
     "tests/model-catalog.test.ts",
-    '        tool_mode: "code_mode_only",',
-    '        tool_mode: null,',
+    '''        slug: route.slug,
+        display_name: route.displayName,
+        tool_mode: "code_mode_only",
+        default_reasoning_level: route.codexEffort,''',
+    '''        slug: route.slug,
+        display_name: route.displayName,
+        tool_mode: null,
+        default_reasoning_level: route.codexEffort,''',
 )
 replace_once(
     "tests/model-catalog.test.ts",
