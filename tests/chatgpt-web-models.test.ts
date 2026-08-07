@@ -50,20 +50,20 @@ describe("fixed ChatGPT Web model routes", () => {
     for (const effort of ["low", "medium"] as const) {
       expect(resolveChatGptWebContextLimits(effort)).toEqual({
         contextWindow: 150_000,
-        autoCompactTokenLimit: 135_000,
+        autoCompactTokenLimit: 112_500,
       });
     }
     expect(resolveChatGptWebContextLimits("high")).toEqual({
       contextWindow: 185_000,
-      autoCompactTokenLimit: 166_500,
+      autoCompactTokenLimit: 138_750,
     });
     expect(resolveChatGptWebContextLimits("xhigh")).toEqual({
       contextWindow: 256_000,
-      autoCompactTokenLimit: 230_400,
+      autoCompactTokenLimit: 192_000,
     });
     expect(resolveChatGptWebContextLimits("max")).toEqual({
       contextWindow: 272_000,
-      autoCompactTokenLimit: 244_800,
+      autoCompactTokenLimit: 204_000,
     });
   });
 

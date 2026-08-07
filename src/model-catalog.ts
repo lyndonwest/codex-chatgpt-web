@@ -84,7 +84,7 @@ export function buildChatGptWebModel(
     // Keep every routed Web model inside Codex's native code-mode and subagent model registry.
     // Pro's lack of local computer tools is enforced by the adapter runtime; `requiresPro` is only
     // an account-entitlement gate and must not make the model disappear from native orchestration.
-    tool_mode: config.mode === "full" ? template.tool_mode : null,
+    tool_mode: null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],

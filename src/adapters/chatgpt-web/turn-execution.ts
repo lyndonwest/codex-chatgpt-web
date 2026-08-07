@@ -171,6 +171,24 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
   });
 }
 
+/**
+ * Deduplicate compaction for one source browser turn independently of the exact native history
+ * revision. Codex can submit a slightly newer checkpoint request while the first compaction is
+ * still in flight; keying by the entire compaction input allowed both requests to open browser
+ * tabs concurrently. A failed retryable session is still explicitly retired by the adapter, so a
+ * later retry can create one fresh browser turn without overlapping the previous attempt.
+ */
+export function chatGptCompactionExecutionKey(parsed: CodexParsedRequest): string {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const source = extractChatGptCompactionSourceRevision(parsed);
+  return executionKey(parsed, {
+    threadId: identity.threadId,
+    turnId: source.turnId ?? identity.turnId,
+    purpose: "compaction",
+  });
+}
+
 export class ChatGptTurnSession {
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;

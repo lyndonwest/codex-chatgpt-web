@@ -27,8 +27,11 @@ export function resolveChatGptWebContextLimits(
         : CHATGPT_WEB_INSTANT_MEDIUM_CONTEXT_WINDOW;
   return {
     contextWindow,
-    // Leave ten percent for Codex to submit and receive the compact checkpoint before the hard cap.
-    autoCompactTokenLimit: Math.floor(contextWindow * 0.9),
+    // Browser compaction replays the retained Codex history inside an additional transport
+    // envelope and must also leave room for ChatGPT product overhead plus the generated summary.
+    // Ten percent proved insufficient for long Full Harness turns, so compact conservatively
+    // before the browser request approaches the product's hard context limit.
+    autoCompactTokenLimit: Math.floor(contextWindow * 0.75),
   };
 }
 
