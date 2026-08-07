@@ -5,7 +5,7 @@ import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary } from "../src/
 import { compactRequest, responseRequest } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
-import { chatGptCompactionExecutionKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptCompactionQueue, chatGptCompactionQueueKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
@@ -114,7 +114,7 @@ test("compaction identity accepts a historical source message from the pre-compa
     async runTurn(parsed, _incoming, emit) {
       expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
       expect(() => chatGptCompactionSourceExecutionKey(parsed)).not.toThrow();
-      const stableKey = chatGptCompactionExecutionKey(parsed);
+      const queueKey = chatGptCompactionQueueKey(parsed);
       const revised = structuredClone(parsed);
       const raw = revised._rawBody as { input: unknown[] };
       raw.input = [
@@ -125,14 +125,41 @@ test("compaction identity accepts a historical source message from the pre-compa
           content: [{ type: "output_text", text: "A later transport revision" }],
         },
       ];
+      // Distinct checkpoint revisions keep distinct replay identities, while browser execution is
+      // serialized by the stable native thread identity.
       expect(chatGptTurnExecutionKey(revised)).not.toBe(chatGptTurnExecutionKey(parsed));
-      expect(chatGptCompactionExecutionKey(revised)).toBe(stableKey);
+      expect(chatGptCompactionQueueKey(revised)).toBe(queueKey);
       emit({ type: "text_delta", text: summary, phase: "final_answer" });
       emit({ type: "done", stopReason: "stop", endTurn: true });
     },
   }));
 
   expect(response.status).toBe(200);
+});
+
+test("serializes revised browser compactions without collapsing their work", async () => {
+  const queue = new ChatGptCompactionQueue();
+  const order: string[] = [];
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+  const first = queue.run("thread", async () => {
+    order.push("first-start");
+    await firstGate;
+    order.push("first-end");
+    return "first";
+  });
+  const second = queue.run("thread", async () => {
+    order.push("second-start");
+    return "second";
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(order).toEqual(["first-start"]);
+  releaseFirst();
+  expect(await Promise.all([first, second])).toEqual(["first", "second"]);
+  expect(order).toEqual(["first-start", "first-end", "second-start"]);
 });
 
 test("returns exactly one native compaction item for a ChatGPT Web v2 request", async () => {

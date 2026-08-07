@@ -10,7 +10,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./env
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionExecutionKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionQueue, chatGptCompactionQueueKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
@@ -182,7 +182,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
     if (!mode.localTools) {
-      const browser = worker.run({
+      const runBrowser = () => worker.run({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -193,6 +193,12 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
       });
+      const browser = parsed._compactionRequest
+        ? chatGptCompactionQueue.run(
+          `${executionNamespace}:${chatGptCompactionQueueKey(parsed)}`,
+          runBrowser,
+        )
+        : runBrowser();
       return {
         mode: "read-only",
         browser,
@@ -281,9 +287,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
-      const executionKey = `${executionNamespace}:${parsed._compactionRequest
-        ? chatGptCompactionExecutionKey(parsed)
-        : chatGptTurnExecutionKey(parsed)}`;
+      const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
       const session = chatGptTurnSessions.getOrCreate(
