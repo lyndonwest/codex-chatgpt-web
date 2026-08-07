@@ -64,7 +64,7 @@ function wireName(tool: CodexTool): string {
   return namespacedToolName(tool.namespace, tool.name);
 }
 
-function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool | undefined {
+export function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool | undefined {
   return environment.tools.find(tool => (!tool.namespace || tool.namespace === "functions") && tool.name === name);
 }
 
