@@ -25,8 +25,8 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Apply local patch stack
-        run: git apply --check .github/lyndon-full-harness.patch && git apply .github/lyndon-full-harness.patch
+      - name: Apply local source transformations
+        run: python3 .github/apply_lyndon_fixes.py
 
       - name: Install dependencies
         run: |
@@ -40,7 +40,7 @@ jobs:
 
       - name: Commit verified source changes
         run: |
-          rm -f .github/lyndon-full-harness.patch .github/workflows/apply-lyndon-full-harness-fixes.yml
+          rm -f .github/lyndon-full-harness.patch .github/apply_lyndon_fixes.py .github/workflows/apply-lyndon-full-harness-fixes.yml
           git config user.name "Lyndon Full Harness CI"
           git config user.email "actions@users.noreply.github.com"
           git add -A
