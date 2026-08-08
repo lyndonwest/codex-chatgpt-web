@@ -125,6 +125,23 @@ jobs:
               'helper continuation validation',
           )
 
+          # `reused` is a persistent-session signal. Preserve the existing trace-replacement
+          # contract for legacy/no-session launcher turns so old callers and tests remain stable.
+          ensure_replace(
+              'launcher/electron/browser-host.cjs',
+              '      return { surfaceId: existing.surfaceId, tabId: existing.id, reused: true };',
+              '      return { surfaceId: existing.surfaceId, tabId: existing.id, ...(sessionId ? { reused: true } : {}) };',
+              'session-only reuse flag',
+          )
+
+          # Preserve the old four-argument call shape when no persistent session id was supplied.
+          ensure_replace(
+              'launcher/electron/control-server.cjs',
+              '''        const lease = host.beginTurn(\n          body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid, body.sessionId,\n        );''',
+              '''        const lease = body.sessionId === undefined\n          ? host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid)\n          : host.beginTurn(\n            body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid, body.sessionId,\n          );''',
+              'legacy beginTurn call shape',
+          )
+
           expected = {
               'src/adapters/chatgpt-web/prompt.ts': [
                   'continuation?: ChatGptWebPromptPayload',
@@ -141,8 +158,11 @@ jobs:
               ],
               'launcher/electron/browser-host.cjs': [
                   'browser.session_tab_retained',
-                  'reused: true',
+                  '...(sessionId ? { reused: true } : {})',
                   'sessionId = null',
+              ],
+              'launcher/electron/control-server.cjs': [
+                  'body.sessionId === undefined',
               ],
           }
           for path, markers in expected.items():
