@@ -249,7 +249,20 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
-  createTurnTab(traceId, helperPid) {
+  createTurnTab(traceId, helperPid, sessionId = null) {
+    if (this.turnTabs.size >= MAX_BROWSER_TABS) {
+      const evictable = [...this.turnTabs.values()]
+        .filter(tab => tab.sessionId && tab.status !== "running")
+        .sort((left, right) => (left.lastUsedAt || 0) - (right.lastUsedAt || 0))[0];
+      if (evictable) {
+        this.logger.info("browser.session_tab_evicted", {
+          tabId: evictable.id,
+          sessionId: evictable.sessionId,
+          status: evictable.status,
+        });
+        this.removeTurnTab(evictable, false);
+      }
+    }
     if (this.turnTabs.size >= MAX_BROWSER_TABS) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
@@ -274,6 +287,8 @@ class BrowserHost {
       id,
       surfaceId,
       traceId,
+      sessionId,
+      lastUsedAt: Date.now(),
       helperPid,
       view,
       status: "running",
@@ -759,12 +774,17 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  beginTurn(traceId, reveal, helperPid) {
+  beginTurn(traceId, reveal, helperPid, sessionId = null) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
-    const existing = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    const existing = sessionId
+      ? [...this.turnTabs.values()].find((tab) => tab.sessionId === sessionId)
+      : [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (existing) {
+      if (existing.status === "running" && existing.traceId !== traceId && processRunning(existing.helperPid)) {
+        throw new Error(`ChatGPT browser session ${sessionId || traceId} already has an active turn`);
+      }
       if (existing.status === "running" && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
@@ -777,6 +797,9 @@ class BrowserHost {
           evidence: "previous helper exited",
         });
       }
+      existing.traceId = traceId;
+      if (sessionId) existing.sessionId = sessionId;
+      existing.lastUsedAt = Date.now();
       existing.helperPid = helperPid;
       existing.status = "running";
       existing.loading = true;
@@ -790,15 +813,15 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
-      return { surfaceId: existing.surfaceId, tabId: existing.id };
+      return { surfaceId: existing.surfaceId, tabId: existing.id, ...(sessionId ? { reused: true } : {}) };
     }
-    const tab = this.createTurnTab(traceId, helperPid);
+    const tab = this.createTurnTab(traceId, helperPid, sessionId);
     this.selectedTabId = tab.id;
     if (reveal) this.show();
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    return { surfaceId: tab.surfaceId, tabId: tab.id };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false };
   }
 
   async endTurn(traceId, helperPid, status, hideAfterTurn, message) {
@@ -819,17 +842,26 @@ class BrowserHost {
     tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
     tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
+    tab.lastUsedAt = Date.now();
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
-    // A browser tab represents an active Codex turn, not durable task history. Retaining terminal
-    // tabs leaked one slot per response/compaction until the five-tab safety limit made later
-    // turns fail. The result already lives in Codex; release the browser document on every
-    // terminal path while leaving other concurrently running tabs untouched.
-    this.removeTurnTab(tab, false);
+    const retainSession = Boolean(tab.sessionId) && status !== "failed";
+    if (retainSession) {
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
+      this.logger.info("browser.session_tab_retained", {
+        tabId: tab.id,
+        traceId,
+        sessionId: tab.sessionId,
+        status: tab.status,
+      });
+    } else {
+      this.removeTurnTab(tab, false);
+      this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
+    }
     if (hideAfterTurn && !this.activeTraceId) this.hide();
-    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
   }
 
   async returnToIdle() {
