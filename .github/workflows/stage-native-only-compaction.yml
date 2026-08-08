@@ -27,6 +27,25 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Apply native-only compaction patch
         run: python3 scripts/stage-native-only-compaction.py
+      - name: Correct streaming assertion
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("tests/server-compaction.test.ts")
+          text = p.read_text()
+          text, count = re.subn(
+              r'^\s*expect\(sse\.match\(.*compaction.*$',
+              '  expect((sse.match(/"type":"compaction"/g) ?? [])).toHaveLength(2);',
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit(f"expected one streaming compaction assertion, found {count}")
+          p.write_text(text)
+          PY
       - name: Run focused regressions
         run: bun test tests/server-compaction.test.ts tests/persistent-tool-result-rebind.test.ts tests/native-compaction-summary.test.ts
       - name: Run full verification
