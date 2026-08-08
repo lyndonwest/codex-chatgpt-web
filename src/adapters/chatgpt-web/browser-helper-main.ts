@@ -19,6 +19,7 @@ interface RunMessage {
   turn: {
     traceId: string;
     sessionId?: string;
+    preserveConnectorSelection?: boolean;
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
@@ -97,6 +98,10 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(message.turn.sessionId)) {
     throw new Error("Browser helper session identity is invalid");
   }
+  if (message.turn.preserveConnectorSelection !== undefined
+    && typeof message.turn.preserveConnectorSelection !== "boolean") {
+    throw new Error("Browser helper connector preservation flag is invalid");
+  }
   const continuation = message.turn.prepared.continuation;
   if (continuation !== undefined
     && (typeof continuation.text !== "string" || !Array.isArray(continuation.images))) {
@@ -118,6 +123,7 @@ async function run(message: RunMessage): Promise<void> {
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
     ...(message.turn.sessionId ? { sessionId: message.turn.sessionId } : {}),
+    ...(message.turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,

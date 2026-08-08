@@ -116,3 +116,37 @@ test("adapter derives persistent browser identity from native thread metadata wi
   expect(source).toContain("startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId)");
   expect(source).toContain("const traceId = createHash");
 });
+
+
+test("native compaction preserves an existing connector selection across the read-only checkpoint", () => {
+  const workerSource = readFileSync(
+    new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url),
+    "utf8",
+  );
+  const adapterSource = readFileSync(
+    new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
+    "utf8",
+  );
+  const helperClientSource = readFileSync(
+    new URL("../src/adapters/chatgpt-web/launcher-helper-client.ts", import.meta.url),
+    "utf8",
+  );
+  const helperMainSource = readFileSync(
+    new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url),
+    "utf8",
+  );
+
+  expect(adapterSource).toContain("...(parsed._compactionRequest ? { preserveConnectorSelection: true } : {}),");
+  expect(workerSource).toContain("preserveConnectorSelection?: boolean;");
+  expect(workerSource).toContain(
+    "const preserveConnector = preserveConnectorSelection && await this.connectorIsSelected(composer);",
+  );
+  expect(workerSource).toContain("connector-preserved-for-read-only-checkpoint");
+  expect(workerSource).toContain("if (existingText.length > 0)");
+  expect(workerSource).toContain('if (preserveConnector) await composer.press("End")');
+  expect(helperClientSource).toContain(
+    "...(turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),",
+  );
+  expect(helperMainSource).toContain("preserveConnectorSelection?: boolean;");
+  expect(helperMainSource).toContain("Browser helper connector preservation flag is invalid");
+});

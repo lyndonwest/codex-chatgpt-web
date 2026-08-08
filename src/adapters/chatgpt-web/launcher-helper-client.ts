@@ -167,6 +167,7 @@ export class LauncherBrowserHelperClient {
           turn: {
             traceId: turn.traceId,
             ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
+            ...(turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
