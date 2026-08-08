@@ -173,6 +173,7 @@ function contextualUserMessage(message: CodexMessage): boolean {
 function latestContinuationUserMessage(messages: readonly CodexMessage[]): CodexMessage | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
+    if (message.role === "assistant" || message.role === "toolResult") return undefined;
     if (message.role === "user" && !contextualUserMessage(message)) return message;
   }
   return undefined;
