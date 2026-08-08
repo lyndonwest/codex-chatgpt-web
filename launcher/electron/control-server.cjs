@@ -111,9 +111,16 @@ class BrowserControlServer {
       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
         throw new Error("browser helper pid is invalid");
       }
+      if (body.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(body.sessionId)) {
+        throw new Error("browser session id is invalid");
+      }
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
-        const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
+        const lease = body.sessionId === undefined
+          ? host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid)
+          : host.beginTurn(
+            body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid, body.sessionId,
+          );
         this.logger.info("browser.turn_started", { traceId: body.traceId });
         writeJson(response, 200, { ok: true, ...lease });
         return;

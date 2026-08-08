@@ -8,9 +8,13 @@ export interface ChatGptWebPromptImage {
   detail?: string;
 }
 
-export interface CompiledChatGptWebPrompt {
+export interface ChatGptWebPromptPayload {
   text: string;
   images: ChatGptWebPromptImage[];
+}
+
+export interface CompiledChatGptWebPrompt extends ChatGptWebPromptPayload {
+  continuation?: ChatGptWebPromptPayload;
 }
 
 const RETIRED_TURN_HANDLE = /\b(turn|binding)_[A-Za-z0-9_-]{24,}/g;
@@ -31,11 +35,9 @@ const DROPPED_IMAGE_NOTE =
   `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
 
 /**
- * Every turn opens a fresh Temporary Chat, so ChatGPT keeps nothing from the previous one: an image
- * the task still reasons about has to be re-attached on each turn or it stops existing for the
- * model. Carrying the conversation's images forward is therefore the contract, not a leak - the
- * only bound is ChatGPT's per-message limit, and the overflow is dropped from the oldest end so the
- * images the task is working on survive.
+ * A fresh/fallback Temporary Chat keeps nothing from a previous browser session, so the full
+ * bootstrap prompt re-attaches the newest task images. Persistent same-thread continuations attach
+ * only images from the newest user revision because the earlier images already exist in that chat.
  */
 interface ImageBudget {
   seen: number;
@@ -160,6 +162,81 @@ export function chatGptReadOnlyContextWarning(
   return `⚠️ ${label} cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them. Prepare the local context with a tool-capable ChatGPT Web model first, then switch back.`;
 }
 
+function contextualUserMessage(message: CodexMessage): boolean {
+  if (message.role !== "user") return false;
+  const text = plainMessageText(message)?.trim();
+  if (!text) return false;
+  return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
+    || isReadableCompactionSummaryText(text);
+}
+
+function latestContinuationUserMessage(messages: readonly CodexMessage[]): CodexMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" || message.role === "toolResult") return undefined;
+    if (message.role === "user" && !contextualUserMessage(message)) return message;
+  }
+  return undefined;
+}
+
+function compileChatGptWebContinuationPrompt(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  turnToken?: string,
+): ChatGptWebPromptPayload {
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  if (parsed._compactionRequest) {
+    return {
+      text: [
+        "Continue the existing Codex task in this same ChatGPT Temporary Chat.",
+        "This is a native Codex history-compaction checkpoint, not a normal task turn.",
+        "Do not call local tools, the Codex Native connector, web search, or any other tool.",
+        "Summarize the task state already present in this conversation so another Codex model can resume it.",
+        "Preserve active instructions, decisions, completed work, unresolved work, important paths/identifiers, and any tool results needed to continue.",
+        "Return only the checkpoint summary.",
+      ].join("\n"),
+      images: [],
+    };
+  }
+
+  const images: ChatGptWebPromptImage[] = [];
+  const latestUser = latestContinuationUserMessage(parsed.context.messages);
+  let incrementalUser = "No new human-authored instruction was present; continue the unfinished Codex task from this conversation.";
+  if (latestUser) {
+    const budget: ImageBudget = {
+      seen: 0,
+      dropped: Math.max(0, countChatGptContextImages([latestUser]) - CHATGPT_MAX_INPUT_IMAGES),
+    };
+    incrementalUser = JSON.stringify(messageEnvelope(latestUser, images, budget));
+  }
+
+  const capabilityContract = mode.localTools
+    ? [
+      `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}.`,
+      "Copy the exact binding_ value returned by codex_bind_turn into every later Codex Native call in this response.",
+      "The Codex Native binding is for this outer Codex round only; prior binding and turn handles in the conversation are retired.",
+      "Keep calling local tools until the requested work is complete and verified.",
+    ]
+    : [
+      `This continuation is ChatGPT Web ${mode.displayLabel} without a Codex Native local-computer bridge.`,
+      "Use ChatGPT-native capabilities when useful, but do not claim new local file/command access that did not occur in this response.",
+    ];
+
+  return {
+    text: [
+      "Continue the existing Codex task in this same ChatGPT Temporary Chat.",
+      "The earlier messages in this browser conversation remain the authoritative task history; do not ask for them to be replayed.",
+      "The JSON below is only the newest active user revision from native Codex. Treat it at normal user-message priority and continue the existing task.",
+      ...capabilityContract,
+      "<codex_incremental_user_json>",
+      incrementalUser,
+      "</codex_incremental_user_json>",
+      "Return only the answer that the outer Codex task should receive.",
+    ].join("\n"),
+    images,
+  };
+}
+
 export function compileChatGptWebPrompt(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
@@ -254,5 +331,9 @@ export function compileChatGptWebPrompt(
     ...contextTransport,
     ...transportResume,
   ].join("\n");
-  return { text, images };
+  return {
+    text,
+    images,
+    continuation: compileChatGptWebContinuationPrompt(parsed, capabilities, turnToken),
+  };
 }

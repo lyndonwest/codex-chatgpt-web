@@ -200,6 +200,7 @@ export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 200_000;
 
 export interface BrowserTurn {
   traceId: string;
+  sessionId?: string;
   modelId: string;
   reasoning?: string;
   capabilities: ChatGptWebCapabilities;
@@ -1420,6 +1421,7 @@ export class ChatGptBrowserWorker {
       phase: "start",
       traceId: turn.traceId,
       helperPid: process.pid,
+      ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
     });
     const surfaceId = lease.surfaceId;
     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
@@ -1427,7 +1429,7 @@ export class ChatGptBrowserWorker {
     let terminalMessage: string | undefined;
     let originalError: unknown;
     try {
-      return await this.runBrowserTurn(turn, surfaceId);
+      return await this.runBrowserTurn(turn, surfaceId, lease.reused === true);
     } catch (error) {
       originalError = error;
       terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
@@ -1451,7 +1453,7 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
+  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string, reuseExistingChat = false): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities);
     const prepared = await turn.prepare();
@@ -1461,11 +1463,6 @@ export class ChatGptBrowserWorker {
     let diagnosticPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
-      assertChatGptWebInputWithinContextWindow(
-        estimatedInputTokens,
-        requestedMode.effort,
-      );
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
@@ -1493,15 +1490,28 @@ export class ChatGptBrowserWorker {
       });
       if (!launcherSurfaceId) managedPage = page;
       if (launcherSurfaceId) await ensureChatGptOperationalViewport(page);
+      if (reuseExistingChat && !prepared.continuation) {
+        throw new Error("Persistent ChatGPT browser session has no incremental continuation prompt");
+      }
+      const effectivePrepared = reuseExistingChat ? prepared.continuation! : prepared;
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
+      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId);
+      assertChatGptWebInputWithinContextWindow(estimatedInputTokens, requestedMode.effort);
       console.info(
-        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
+        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, persistent=${reuseExistingChat}, promptChars=${effectivePrepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${effectivePrepared.images.length})`,
       );
-      await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
-        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
-      ));
-      await diagnostics.capture(page, "temporary-chat-navigation-complete");
+      if (reuseExistingChat) {
+        await this.runStage(turn.traceId, "persistent_chat_settle", browserStageTimeouts.navigation, () => (
+          this.waitForExistingChatIdle(page)
+        ));
+        await diagnostics.capture(page, "persistent-chat-reused");
+      } else {
+        await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
+          page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
+        ));
+        await diagnostics.capture(page, "temporary-chat-navigation-complete");
+      }
       try {
         await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
           this.activeComposer(page)
@@ -1527,11 +1537,11 @@ export class ChatGptBrowserWorker {
       ));
       await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
-        this.attachPrompt(page, prepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
+        this.attachPrompt(page, effectivePrepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
       ));
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
-        this.attachFiles(page, prepared)
+        this.attachFiles(page, effectivePrepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
@@ -1697,5 +1707,15 @@ export class ChatGptBrowserWorker {
         });
       }
     }
+  }
+
+  private async waitForExistingChatIdle(page: Page, timeoutMs = 30_000): Promise<void> {
+    const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await stop.count() === 0) return;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+    }
+    throw new Error("Retained ChatGPT conversation did not settle after the previous Codex turn stopped");
   }
 }

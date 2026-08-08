@@ -171,11 +171,21 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       : undefined,
   );
 
+  const browserSessionId = (parsed: CodexParsedRequest): string | undefined => {
+    const threadId = extractChatGptTurnIdentity(parsed).threadId;
+    if (!threadId) return undefined;
+    return createHash("sha256")
+      .update(`${executionNamespace}:browser-thread:${threadId}`)
+      .digest("hex")
+      .slice(0, 24);
+  };
+
   const startRuntime = (
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
+    sessionId: string | undefined,
   ): ChatGptTurnRuntime => {
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const browserAbort = new AbortController();
@@ -184,6 +194,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     if (!mode.localTools) {
       const runBrowser = () => worker.run({
         traceId,
+        ...(sessionId ? { sessionId } : {}),
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
@@ -213,6 +224,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     let activeToken: string | undefined;
     const browser = worker.run({
       traceId,
+      ...(sessionId ? { sessionId } : {}),
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
@@ -290,9 +302,10 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+      const persistentSessionId = browserSessionId(parsed);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
-        () => startRuntime(parsed, environment, traceId, turnCapabilities),
+        () => startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId),
       );
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {

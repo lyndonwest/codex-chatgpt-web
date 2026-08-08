@@ -166,10 +166,15 @@ export class LauncherBrowserHelperClient {
           },
           turn: {
             traceId: turn.traceId,
+            ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
-            prepared: { text: prepared.text, images: prepared.images } satisfies CompiledChatGptWebPrompt,
+            prepared: {
+              text: prepared.text,
+              images: prepared.images,
+              ...(prepared.continuation ? { continuation: prepared.continuation } : {}),
+            } satisfies CompiledChatGptWebPrompt,
           },
         }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
