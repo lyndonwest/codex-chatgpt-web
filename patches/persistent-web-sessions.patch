@@ -1,1 +1,728 @@
-<PATCH_PLACEHOLDER>
+diff --git a/src/adapters/chatgpt-web/prompt.ts b/src/adapters/chatgpt-web/prompt.ts
+--- a/src/adapters/chatgpt-web/prompt.ts
++++ b/src/adapters/chatgpt-web/prompt.ts
+@@ -3,10 +3,14 @@ import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
+ import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+ 
+ export interface ChatGptWebPromptImage {
+   ref: string;
+   imageUrl: string;
+   detail?: string;
+ }
+ 
+-export interface CompiledChatGptWebPrompt {
++export interface ChatGptWebPromptPayload {
+   text: string;
+   images: ChatGptWebPromptImage[];
+ }
+ 
++export interface CompiledChatGptWebPrompt extends ChatGptWebPromptPayload {
++  continuation?: ChatGptWebPromptPayload;
++}
++
+ const RETIRED_TURN_HANDLE = /\b(turn|binding)_[A-Za-z0-9_-]{24,}/g;
+@@ -24,12 +28,10 @@ export const CHATGPT_MAX_INPUT_IMAGES = 10;
+ const DROPPED_IMAGE_NOTE =
+   `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
+ 
+ /**
+- * Every turn opens a fresh Temporary Chat, so ChatGPT keeps nothing from the previous one: an image
+- * the task still reasons about has to be re-attached on each turn or it stops existing for the
+- * model. Carrying the conversation's images forward is therefore the contract, not a leak - the
+- * only bound is ChatGPT's per-message limit, and the overflow is dropped from the oldest end so the
+- * images the task is working on survive.
++ * A fresh/fallback Temporary Chat keeps nothing from a previous browser session, so the full
++ * bootstrap prompt re-attaches the newest task images. Persistent same-thread continuations attach
++ * only images from the newest user revision because the earlier images already exist in that chat.
+  */
+ interface ImageBudget {
+@@ -157,6 +159,75 @@ export function chatGptReadOnlyContextWarning(
+   return `⚠️ ${label} cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them. Prepare the local context with a tool-capable ChatGPT Web model first, then switch back.`;
+ }
+ 
++function contextualUserMessage(message: CodexMessage): boolean {
++  if (message.role !== "user") return false;
++  const text = plainMessageText(message)?.trim();
++  if (!text) return false;
++  return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
++    || isReadableCompactionSummaryText(text);
++}
++
++function latestContinuationUserMessage(messages: readonly CodexMessage[]): CodexMessage | undefined {
++  for (let index = messages.length - 1; index >= 0; index -= 1) {
++    const message = messages[index]!;
++    if (message.role === "user" && !contextualUserMessage(message)) return message;
++  }
++  return undefined;
++}
++
++function compileChatGptWebContinuationPrompt(
++  parsed: CodexParsedRequest,
++  capabilities: ChatGptWebCapabilities,
++  turnToken?: string,
++): ChatGptWebPromptPayload {
++  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
++  if (parsed._compactionRequest) {
++    return {
++      text: [
++        "Continue the existing Codex task in this same ChatGPT Temporary Chat.",
++        "This is a native Codex history-compaction checkpoint, not a normal task turn.",
++        "Do not call local tools, the Codex Native connector, web search, or any other tool.",
++        "Summarize the task state already present in this conversation so another Codex model can resume it.",
++        "Preserve active instructions, decisions, completed work, unresolved work, important paths/identifiers, and any tool results needed to continue.",
++        "Return only the checkpoint summary.",
++      ].join("\n"),
++      images: [],
++    };
++  }
++
++  const images: ChatGptWebPromptImage[] = [];
++  const latestUser = latestContinuationUserMessage(parsed.context.messages);
++  let incrementalUser = "No new human-authored instruction was present; continue the unfinished Codex task from this conversation.";
++  if (latestUser) {
++    const budget: ImageBudget = {
++      seen: 0,
++      dropped: Math.max(0, countChatGptContextImages([latestUser]) - CHATGPT_MAX_INPUT_IMAGES),
++    };
++    incrementalUser = JSON.stringify(messageEnvelope(latestUser, images, budget));
++  }
++
++  const capabilityContract = mode.localTools
++    ? [
++      `Before commentary, an answer, or any other tool call, call codex_bind_turn with turn_token ${turnToken}.`,
++      "Copy the exact binding_ value returned by codex_bind_turn into every later Codex Native call in this response.",
++      "The Codex Native binding is for this outer Codex round only; prior binding and turn handles in the conversation are retired.",
++      "Keep calling local tools until the requested work is complete and verified.",
++    ]
++    : [
++      `This continuation is ChatGPT Web ${mode.displayLabel} without a Codex Native local-computer bridge.`,
++      "Use ChatGPT-native capabilities when useful, but do not claim new local file/command access that did not occur in this response.",
++    ];
++
++  return {
++    text: [
++      "Continue the existing Codex task in this same ChatGPT Temporary Chat.",
++      "The earlier messages in this browser conversation remain the authoritative task history; do not ask for them to be replayed.",
++      "The JSON below is only the newest active user revision from native Codex. Treat it at normal user-message priority and continue the existing task.",
++      ...capabilityContract,
++      "<codex_incremental_user_json>",
++      incrementalUser,
++      "</codex_incremental_user_json>",
++      "Return only the answer that the outer Codex task should receive.",
++    ].join("\n"),
++    images,
++  };
++}
++
+ export function compileChatGptWebPrompt(
+   parsed: CodexParsedRequest,
+   capabilities: ChatGptWebCapabilities,
+@@ -266,5 +337,10 @@ export function compileChatGptWebPrompt(
+     ...contextTransport,
+     ...transportResume,
+   ].join("\n");
+-  return { text, images };
++  return {
++    text,
++    images,
++    continuation: compileChatGptWebContinuationPrompt(parsed, capabilities, turnToken),
++  };
+ }
+diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
+--- a/src/adapters/chatgpt-web/index.ts
++++ b/src/adapters/chatgpt-web/index.ts
+@@ -188,11 +188,21 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+       : undefined,
+   );
+ 
++  const browserSessionId = (parsed: CodexParsedRequest): string | undefined => {
++    const threadId = extractChatGptTurnIdentity(parsed).threadId;
++    if (!threadId) return undefined;
++    return createHash("sha256")
++      .update(`${executionNamespace}:browser-thread:${threadId}`)
++      .digest("hex")
++      .slice(0, 24);
++  };
++
+   const startRuntime = (
+     parsed: CodexParsedRequest,
+     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
+     traceId: string,
+     turnCapabilities: ChatGptWebCapabilities,
++    sessionId: string | undefined,
+   ): ChatGptTurnRuntime => {
+@@ -202,6 +212,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+     if (!mode.localTools) {
+       const runBrowser = () => worker.run({
+         traceId,
++        ...(sessionId ? { sessionId } : {}),
+         modelId: parsed.modelId,
+         reasoning: parsed.options.reasoning,
+@@ -236,6 +247,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+     let activeToken: string | undefined;
+     const browser = worker.run({
+       traceId,
++      ...(sessionId ? { sessionId } : {}),
+       modelId: parsed.modelId,
+       reasoning: parsed.options.reasoning,
+@@ -316,10 +328,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+       await chatGptTurnSessions.waitForRetirement(executionKey);
+       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
++      const persistentSessionId = browserSessionId(parsed);
+       const session = chatGptTurnSessions.getOrCreate(
+         executionKey,
+-        () => startRuntime(parsed, environment, traceId, turnCapabilities),
++        () => startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId),
+       );
+diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
+--- a/src/adapters/chatgpt-web/browser-worker.ts
++++ b/src/adapters/chatgpt-web/browser-worker.ts
+@@ -305,6 +305,7 @@ export interface BrowserTurn {
+   traceId: string;
++  sessionId?: string;
+   modelId: string;
+@@ -1428,12 +1429,14 @@ export class ChatGptBrowserWorker {
+     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+       phase: "start",
+       traceId: turn.traceId,
+       helperPid: process.pid,
++      ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
+     });
+     const surfaceId = lease.surfaceId;
+     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
+@@ -1443,7 +1446,7 @@ export class ChatGptBrowserWorker {
+     let terminalMessage: string | undefined;
+     let originalError: unknown;
+     try {
+-      return await this.runBrowserTurn(turn, surfaceId);
++      return await this.runBrowserTurn(turn, surfaceId, lease.reused === true);
+@@ -1470,15 +1473,12 @@ export class ChatGptBrowserWorker {
+     }
+   }
+ 
+-  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
++  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string, reuseExistingChat = false): Promise<string> {
+     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities);
+     const prepared = await turn.prepare();
+     const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
+     let turnConnection: Browser | undefined;
+     let managedPage: Page | undefined;
+     let diagnosticPage: Page | undefined;
+     try {
+       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+-      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
+-      assertChatGptWebInputWithinContextWindow(
+-        estimatedInputTokens,
+-        requestedMode.effort,
+-      );
+       const deadline = this.config.turnTimeoutMs === undefined
+         ? undefined
+         : Date.now() + this.config.turnTimeoutMs;
+@@ -1502,10 +1502,15 @@ export class ChatGptBrowserWorker {
+       });
+       if (!launcherSurfaceId) managedPage = page;
+       if (launcherSurfaceId) await ensureChatGptOperationalViewport(page);
++      if (reuseExistingChat && !prepared.continuation) {
++        throw new Error("Persistent ChatGPT browser session has no incremental continuation prompt");
++      }
++      const effectivePrepared = reuseExistingChat ? prepared.continuation! : prepared;
+       diagnosticPage = page;
+       await diagnostics.capture(page, "browser-page-acquired");
++      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId);
++      assertChatGptWebInputWithinContextWindow(estimatedInputTokens, requestedMode.effort);
+       console.info(
+-        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
++        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, persistent=${reuseExistingChat}, promptChars=${effectivePrepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${effectivePrepared.images.length})`,
+       );
+-      await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
+-        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
+-      ));
+-      await diagnostics.capture(page, "temporary-chat-navigation-complete");
++      if (reuseExistingChat) {
++        await this.runStage(turn.traceId, "persistent_chat_settle", browserStageTimeouts.navigation, () => (
++          this.waitForExistingChatIdle(page)
++        ));
++        await diagnostics.capture(page, "persistent-chat-reused");
++      } else {
++        await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
++          page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
++        ));
++        await diagnostics.capture(page, "temporary-chat-navigation-complete");
++      }
+@@ -1534,12 +1539,12 @@ export class ChatGptBrowserWorker {
+       ));
+       await diagnostics.capture(page, "effort-selection-complete");
+       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
+-        this.attachPrompt(page, prepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
++        this.attachPrompt(page, effectivePrepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
+       ));
+       await diagnostics.capture(page, "prompt-attachment-complete");
+       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
+-        this.attachFiles(page, prepared)
++        this.attachFiles(page, effectivePrepared)
+       ));
+@@ -1650,6 +1655,19 @@ export class ChatGptBrowserWorker {
+       }
+     }
+   }
++
++  private async waitForExistingChatIdle(page: Page, timeoutMs = 30_000): Promise<void> {
++    const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
++    const deadline = Date.now() + timeoutMs;
++    while (Date.now() < deadline) {
++      if (await stop.count() === 0) return;
++      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
++    }
++    throw new Error("Retained ChatGPT conversation did not settle after the previous Codex turn stopped");
++  }
+ }
+diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
+--- a/src/adapters/chatgpt-web/launcher-helper-client.ts
++++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
+@@ -167,11 +167,16 @@ export class LauncherBrowserHelperClient {
+           },
+           turn: {
+             traceId: turn.traceId,
++            ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
+             modelId: turn.modelId,
+             reasoning: turn.reasoning,
+             capabilities: turn.capabilities,
+-            prepared: { text: prepared.text, images: prepared.images } satisfies CompiledChatGptWebPrompt,
++            prepared: {
++              text: prepared.text,
++              images: prepared.images,
++              ...(prepared.continuation ? { continuation: prepared.continuation } : {}),
++            } satisfies CompiledChatGptWebPrompt,
+           },
+         }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
+diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
+--- a/src/adapters/chatgpt-web/browser-helper-main.ts
++++ b/src/adapters/chatgpt-web/browser-helper-main.ts
+@@ -17,6 +17,7 @@ interface RunMessage {
+   };
+   turn: {
+     traceId: string;
++    sessionId?: string;
+     modelId: string;
+@@ -75,7 +76,14 @@ async function run(message: RunMessage): Promise<void> {
+   }
+   if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
+   if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {
+     throw new Error("Browser helper prompt is invalid");
+   }
++  if (message.turn.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(message.turn.sessionId)) {
++    throw new Error("Browser helper session identity is invalid");
++  }
++  const continuation = message.turn.prepared.continuation;
++  if (continuation !== undefined
++    && (typeof continuation.text !== "string" || !Array.isArray(continuation.images))) {
++    throw new Error("Browser helper continuation prompt is invalid");
++  }
+@@ -98,6 +106,7 @@ async function run(message: RunMessage): Promise<void> {
+   abortControllers.set(message.id, abortController);
+   const turn: BrowserTurn = {
+     traceId: message.turn.traceId,
++    ...(message.turn.sessionId ? { sessionId: message.turn.sessionId } : {}),
+     modelId: message.turn.modelId,
+diff --git a/src/launcher-browser-host.ts b/src/launcher-browser-host.ts
+--- a/src/launcher-browser-host.ts
++++ b/src/launcher-browser-host.ts
+@@ -253,7 +253,7 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
+ 
+ export type LauncherTurnActivity =
+-  | { phase: "start"; traceId: string; helperPid: number }
++  | { phase: "start"; traceId: string; helperPid: number; sessionId?: string }
+   | {
+@@ -274,7 +274,7 @@ export async function notifyLauncherTurn(
+     ? LAUNCHER_TURN_END_TIMEOUT_MS
+     : LAUNCHER_TURN_START_TIMEOUT_MS,
+-): Promise<{ surfaceId?: string }> {
++): Promise<{ surfaceId?: string; reused?: boolean }> {
+@@ -291,7 +291,10 @@ export async function notifyLauncherTurn(
+         throw new Error("Launcher browser control channel returned an invalid turn surface id");
+       }
+-      return { surfaceId: body.surfaceId };
++      if (body.reused !== undefined && typeof body.reused !== "boolean") {
++        throw new Error("Launcher browser control channel returned an invalid reuse flag");
++      }
++      return { surfaceId: body.surfaceId, ...(body.reused === true ? { reused: true } : {}) };
+diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
+--- a/launcher/electron/control-server.cjs
++++ b/launcher/electron/control-server.cjs
+@@ -111,9 +111,13 @@ class BrowserControlServer {
+       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
+         throw new Error("browser helper pid is invalid");
+       }
++      if (body.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(body.sessionId)) {
++        throw new Error("browser session id is invalid");
++      }
+       const preferences = this.getPreferences();
+       if (request.url === "/v1/turn/start") {
+-        const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
++        const lease = host.beginTurn(
++          body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid, body.sessionId,
++        );
+         this.logger.info("browser.turn_started", { traceId: body.traceId });
+diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
+--- a/launcher/electron/browser-host.cjs
++++ b/launcher/electron/browser-host.cjs
+@@ -227,7 +227,20 @@ class BrowserHost {
+     return this.turnTabs.get(this.selectedTabId) || null;
+   }
+ 
+-  createTurnTab(traceId, helperPid) {
++  createTurnTab(traceId, helperPid, sessionId = null) {
++    if (this.turnTabs.size >= MAX_BROWSER_TABS) {
++      const evictable = [...this.turnTabs.values()]
++        .filter(tab => tab.sessionId && tab.status !== "running")
++        .sort((left, right) => (left.lastUsedAt || 0) - (right.lastUsedAt || 0))[0];
++      if (evictable) {
++        this.logger.info("browser.session_tab_evicted", {
++          tabId: evictable.id,
++          sessionId: evictable.sessionId,
++          status: evictable.status,
++        });
++        this.removeTurnTab(evictable, false);
++      }
++    }
+     if (this.turnTabs.size >= MAX_BROWSER_TABS) {
+       throw new Error(
+@@ -253,6 +266,8 @@ class BrowserHost {
+       surfaceId,
+       traceId,
++      sessionId,
++      lastUsedAt: Date.now(),
+       helperPid,
+@@ -730,11 +745,13 @@ class BrowserHost {
+     return this.snapshot();
+   }
+ 
+-  beginTurn(traceId, reveal, helperPid) {
++  beginTurn(traceId, reveal, helperPid, sessionId = null) {
+     if (this.manualOperation) {
+       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+     }
+-    const existing = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
++    const existing = sessionId
++      ? [...this.turnTabs.values()].find((tab) => tab.sessionId === sessionId)
++      : [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+     if (existing) {
++      if (existing.status === "running" && existing.traceId !== traceId && processRunning(existing.helperPid)) {
++        throw new Error(`ChatGPT browser session ${sessionId || traceId} already has an active turn`);
++      }
+       if (existing.status === "running" && existing.helperPid !== helperPid) {
+@@ -749,7 +766,10 @@ class BrowserHost {
+           evidence: "previous helper exited",
+         });
+       }
++      existing.traceId = traceId;
++      if (sessionId) existing.sessionId = sessionId;
++      existing.lastUsedAt = Date.now();
+       existing.helperPid = helperPid;
+@@ -768,11 +788,11 @@ class BrowserHost {
+       this.writeDescriptor();
+       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
+-      return { surfaceId: existing.surfaceId, tabId: existing.id };
++      return { surfaceId: existing.surfaceId, tabId: existing.id, reused: true };
+     }
+-    const tab = this.createTurnTab(traceId, helperPid);
++    const tab = this.createTurnTab(traceId, helperPid, sessionId);
+@@ -783,7 +803,7 @@ class BrowserHost {
+     this.publishState?.(this.snapshot());
+     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
+-    return { surfaceId: tab.surfaceId, tabId: tab.id };
++    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false };
+   }
+@@ -810,14 +830,23 @@ class BrowserHost {
+     tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
+     tab.loading = false;
++    tab.lastUsedAt = Date.now();
+     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
+     if (status === "completed") {
+       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
+     }
+-    // A browser tab represents an active Codex turn, not durable task history. Retaining terminal
+-    // tabs leaked one slot per response/compaction until the five-tab safety limit made later
+-    // turns fail. The result already lives in Codex; release the browser document on every
+-    // terminal path while leaving other concurrently running tabs untouched.
+-    this.removeTurnTab(tab, false);
++    const retainSession = Boolean(tab.sessionId) && status !== "failed";
++    if (retainSession) {
++      this.publishState?.(this.snapshot());
++      this.writeDescriptor();
++      this.logger.info("browser.session_tab_retained", {
++        tabId: tab.id,
++        traceId,
++        sessionId: tab.sessionId,
++        status: tab.status,
++      });
++    } else {
++      this.removeTurnTab(tab, false);
++      this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
++    }
+     if (hideAfterTurn && !this.activeTraceId) this.hide();
+-    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
+   }
+diff --git a/tests/persistent-session.test.ts b/tests/persistent-session.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/persistent-session.test.ts
+@@ -0,0 +1,104 @@
++import { expect, test } from "bun:test";
++import { readFileSync } from "node:fs";
++import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
++import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
++import type { CodexMessage, CodexParsedRequest } from "../src/types";
++
++function request(messages: CodexMessage[], compaction = false): CodexParsedRequest {
++  return {
++    modelId: CHATGPT_WEB_MODEL_ID,
++    context: {
++      systemPrompt: ["system contract"],
++      messages,
++    },
++    stream: true,
++    options: { reasoning: "high" },
++    ...(compaction ? { _compactionRequest: true } : {}),
++  };
++}
++
++test("persistent continuation sends only the newest user revision instead of replaying old context", () => {
++  const old = "old-tool-history-".repeat(20_000);
++  const parsed = request([
++    { role: "developer", content: "developer contract", timestamp: 1 },
++    { role: "user", content: "initial request", timestamp: 2 },
++    {
++      role: "toolResult",
++      toolCallId: "call_old",
++      toolName: "exec_command",
++      content: old,
++      isError: false,
++      timestamp: 3,
++    },
++    { role: "assistant", content: [{ type: "text", text: "progress" }], timestamp: 4 },
++    { role: "user", content: "new steering instruction", timestamp: 5 },
++  ]);
++  const compiled = compileChatGptWebPrompt(
++    parsed,
++    { localToolsEnabled: true, proAvailable: true },
++    "turn_12345678901234567890123456789012",
++  );
++
++  expect(compiled.text).toContain(old);
++  expect(compiled.continuation).toBeDefined();
++  expect(compiled.continuation!.text).toContain("new steering instruction");
++  expect(compiled.continuation!.text).not.toContain("initial request");
++  expect(compiled.continuation!.text).not.toContain(old);
++  expect(compiled.continuation!.text).toContain("codex_bind_turn");
++  expect(compiled.continuation!.text.length).toBeLessThan(compiled.text.length / 20);
++});
++
++test("persistent compaction is a tiny same-chat checkpoint with no replayed transcript or tools", () => {
++  const huge = "historical-context-".repeat(30_000);
++  const parsed = request([
++    { role: "user", content: "do the task", timestamp: 1 },
++    {
++      role: "toolResult",
++      toolCallId: "call_huge",
++      toolName: "exec_command",
++      content: huge,
++      isError: false,
++      timestamp: 2,
++    },
++  ], true);
++  const compiled = compileChatGptWebPrompt(
++    parsed,
++    { localToolsEnabled: false, proAvailable: true },
++  );
++
++  expect(compiled.text).toContain(huge);
++  expect(compiled.continuation).toBeDefined();
++  expect(compiled.continuation!.text).toContain("history-compaction checkpoint");
++  expect(compiled.continuation!.text).not.toContain(huge);
++  expect(compiled.continuation!.text).not.toContain("<codex_context_json>");
++  expect(compiled.continuation!.text).not.toContain("codex_bind_turn");
++  expect(compiled.continuation!.images).toEqual([]);
++  expect(compiled.continuation!.text.length).toBeLessThan(2_000);
++});
++
++test("launcher browser worker chooses the retained-chat continuation without navigating a new Temporary Chat", () => {
++  const source = readFileSync(
++    new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url),
++    "utf8",
++  );
++  expect(source).toContain("lease.reused === true");
++  expect(source).toContain("const effectivePrepared = reuseExistingChat ? prepared.continuation! : prepared");
++  expect(source).toContain('this.runStage(turn.traceId, "persistent_chat_settle"');
++  expect(source).toContain("this.waitForExistingChatIdle(page)");
++  expect(source).toContain("if (reuseExistingChat)");
++  expect(source).toContain("persistent=${reuseExistingChat}");
++});
++
++test("adapter derives persistent browser identity from native thread metadata without replacing execution identity", () => {
++  const source = readFileSync(
++    new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
++    "utf8",
++  );
++  expect(source).toContain(":browser-thread:");
++  expect(source).toContain("const persistentSessionId = browserSessionId(parsed)");
++  expect(source).toContain("startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId)");
++  expect(source).toContain("const traceId = createHash");
++});
+diff --git a/launcher/tests/persistent-session.test.cjs b/launcher/tests/persistent-session.test.cjs
+new file mode 100644
+--- /dev/null
++++ b/launcher/tests/persistent-session.test.cjs
+@@ -0,0 +1,142 @@
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const { BrowserHost } = require("../electron/browser-host.cjs");
++
++function retainedFixture(tab) {
++  const events = [];
++  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
++    manualOperation: null,
++    turnTabs: new Map([[tab.id, tab]]),
++    closedTurnOwners: new Map(),
++    selectedTabId: tab.id,
++    visible: false,
++    surfaceActive: true,
++    boundsReady: true,
++    window: { contentView: { removeChildView: () => events.push("remove") } },
++    view: { setVisible() {} },
++    syncViewVisibility() {},
++    writeDescriptor: () => events.push("descriptor"),
++    publishState: () => events.push("publish"),
++    snapshot: () => ({ tabs: [] }),
++    hide: () => events.push("hide"),
++    logger: { info: (name) => events.push(name), warn() {} },
++  });
++  return { fixture, events };
++}
++
++test("completed persistent thread keeps its browser document and reuses it for a new trace", async () => {
++  const throttling = [];
++  const tab = {
++    id: "tab-persistent",
++    surfaceId: "surface-persistent",
++    traceId: "trace_first",
++    sessionId: "session_123456789012",
++    helperPid: process.pid,
++    status: "running",
++    loading: true,
++    lastUsedAt: 1,
++    view: {
++      setVisible() {},
++      webContents: {
++        isDestroyed: () => false,
++        setBackgroundThrottling: enabled => throttling.push(enabled),
++        close: () => assert.fail("persistent tab must not close"),
++      },
++    },
++  };
++  const { fixture } = retainedFixture(tab);
++
++  await BrowserHost.prototype.endTurn.call(
++    fixture,
++    tab.traceId,
++    tab.helperPid,
++    "completed",
++    false,
++  );
++  assert.equal(fixture.turnTabs.size, 1);
++  assert.equal(tab.status, "ready");
++
++  const lease = BrowserHost.prototype.beginTurn.call(
++    fixture,
++    "trace_second",
++    false,
++    process.pid,
++    tab.sessionId,
++  );
++  assert.deepEqual(lease, {
++    surfaceId: tab.surfaceId,
++    tabId: tab.id,
++    reused: true,
++  });
++  assert.equal(tab.traceId, "trace_second");
++  assert.equal(tab.status, "running");
++  assert.deepEqual(throttling, [true, false]);
++});
++
++test("aborted persistent turn is retained for native compaction but failed turn is discarded", async () => {
++  for (const [status, retained] of [["aborted", true], ["failed", false]]) {
++    let closed = false;
++    const tab = {
++      id: `tab-${status}`,
++      surfaceId: `surface-${status}`,
++      traceId: `trace_${status}`,
++      sessionId: `session_${status}_123456`,
++      helperPid: process.pid,
++      status: "running",
++      loading: true,
++      lastUsedAt: 1,
++      view: {
++        setVisible() {},
++        webContents: {
++          isDestroyed: () => false,
++          setBackgroundThrottling() {},
++          close: () => { closed = true; },
++        },
++      },
++    };
++    const { fixture } = retainedFixture(tab);
++    await BrowserHost.prototype.endTurn.call(
++      fixture,
++      tab.traceId,
++      tab.helperPid,
++      status,
++      false,
++      `turn ${status}`,
++    );
++    assert.equal(fixture.turnTabs.has(tab.id), retained);
++    assert.equal(closed, !retained);
++  }
++});
++
++test("new persistent thread evicts the oldest non-running retained session at the five-tab limit", () => {
++  const removed = [];
++  const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => {
++    const id = `tab-${index}`;
++    return [id, {
++      id,
++      ordinal: index + 1,
++      traceId: `trace_${index}`,
++      sessionId: `session_${index}_123456789012`,
++      status: "ready",
++      lastUsedAt: index + 1,
++      view: { webContents: { isDestroyed: () => false, close() {} } },
++    }];
++  }));
++  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
++    turnTabs,
++    closedTurnOwners: new Map(),
++    selectedTabId: "home",
++    window: {
++      contentView: {
++        removeChildView: view => removed.push(view),
++        addChildView() {},
++      },
++    },
++    syncViewVisibility() {},
++    publishState() {},
++    writeDescriptor() {},
++    logger: { info() {} },
++  });
++  try {
++    BrowserHost.prototype.createTurnTab.call(
++      fixture, "trace_new", 123, "session_new_123456789",
++    );
++  } catch {
++    // Node launcher tests do not construct a real Electron WebContentsView; eviction happens first.
++  }
++  assert.equal(turnTabs.has("tab-0"), false);
++  assert.equal(turnTabs.size, 4);
++  assert.equal(removed.length, 1);
++});
