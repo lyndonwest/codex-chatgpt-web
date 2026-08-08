@@ -17,6 +17,7 @@ jobs:
       - name: Apply source changes
         run: |
           python3 .github/scripts/apply-tools-menu-connector.py
+          python3 .github/scripts/remove-redundant-connector-reset.py
           python3 .github/scripts/update-tools-menu-test-mocks.py
       - uses: oven-sh/setup-bun@v2
       - name: Install dependencies
