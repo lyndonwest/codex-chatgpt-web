@@ -48,6 +48,23 @@ test("persistent continuation sends only the newest user revision instead of rep
   expect(compiled.continuation!.text.length).toBeLessThan(compiled.text.length / 20);
 });
 
+test("persistent continuation does not replay a user request already consumed by later model state", () => {
+  const parsed = request([
+    { role: "user", content: "original request", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "work completed" }], timestamp: 2 },
+    { role: "user", content: "<environment_context>fresh environment</environment_context>", timestamp: 3 },
+  ]);
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+
+  expect(compiled.continuation).toBeDefined();
+  expect(compiled.continuation!.text).toContain("No new human-authored instruction was present");
+  expect(compiled.continuation!.text).not.toContain("original request");
+});
+
 test("persistent compaction is a tiny same-chat checkpoint with no replayed transcript or tools", () => {
   const huge = "historical-context-".repeat(30_000);
   const parsed = request([
