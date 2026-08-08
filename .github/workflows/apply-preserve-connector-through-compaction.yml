@@ -1,0 +1,139 @@
+name: Apply connector preservation fix
+
+on:
+  push:
+    branches:
+      - lyndon/preserve-connector-through-compaction
+    paths:
+      - .github/workflows/apply-preserve-connector-through-compaction.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused source changes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match in {path}, got {count}')
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '''export interface BrowserTurn {\n  traceId: string;\n  sessionId?: string;\n  modelId: string;\n''',
+              '''export interface BrowserTurn {\n  traceId: string;\n  sessionId?: string;\n  preserveConnectorSelection?: boolean;\n  modelId: string;\n''',
+              'browser turn preservation flag',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '''      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (\n        this.attachPrompt(page, effectivePrepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))\n      ));\n''',
+              '''      await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (\n        this.attachPrompt(\n          page,\n          effectivePrepared.text,\n          mode.localTools,\n          turn.preserveConnectorSelection === true,\n          checkpoint => diagnostics.capture(page, checkpoint),\n        )\n      ));\n''',
+              'attach prompt preservation argument',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '''  private async attachPrompt(\n    page: Page,\n    prompt: string,\n    localTools: boolean,\n    captureDiagnostic?: (checkpoint: string) => Promise<void>,\n  ): Promise<void> {\n    if (!localTools) {\n      const composer = await this.activeComposer(page);\n      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can\n      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,\n      // then transport the complete text in one CDP Input.insertText command.\n      await composer.fill("");\n      await composer.focus();\n      await this.insertPromptText(page, prompt);\n      await this.assertPromptAttached(page, prompt);\n      return;\n    }\n''',
+              '''  private async attachPrompt(\n    page: Page,\n    prompt: string,\n    localTools: boolean,\n    preserveConnectorSelection: boolean,\n    captureDiagnostic?: (checkpoint: string) => Promise<void>,\n  ): Promise<void> {\n    if (!localTools) {\n      const composer = await this.activeComposer(page);\n      const preserveConnector = preserveConnectorSelection && await this.connectorIsSelected(composer);\n      if (preserveConnector) {\n        const existingText = await this.attachedPromptText(page);\n        if (existingText.length > 0) {\n          throw new Error(\n            `Cannot preserve ${JSON.stringify(this.config.appName)} connector with non-empty composer text`,\n          );\n        }\n        await captureDiagnostic?.("connector-preserved-for-read-only-checkpoint");\n      } else {\n        // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can\n        // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,\n        // then transport the complete text in one CDP Input.insertText command.\n        await composer.fill("");\n      }\n      await composer.focus();\n      await page.keyboard.press("End");\n      await this.insertPromptText(page, prompt);\n      await this.assertPromptAttached(page, prompt);\n      return;\n    }\n''',
+              'read-only prompt connector preservation',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/index.ts',
+              '''      const runBrowser = () => worker.run({\n        traceId,\n        ...(sessionId ? { sessionId } : {}),\n        modelId: parsed.modelId,\n''',
+              '''      const runBrowser = () => worker.run({\n        traceId,\n        ...(sessionId ? { sessionId } : {}),\n        ...(parsed._compactionRequest ? { preserveConnectorSelection: true } : {}),\n        modelId: parsed.modelId,\n''',
+              'compaction preservation flag',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/launcher-helper-client.ts',
+              '''          turn: {\n            traceId: turn.traceId,\n            ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),\n            modelId: turn.modelId,\n''',
+              '''          turn: {\n            traceId: turn.traceId,\n            ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),\n            ...(turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),\n            modelId: turn.modelId,\n''',
+              'helper client preservation propagation',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-helper-main.ts',
+              '''  turn: {\n    traceId: string;\n    sessionId?: string;\n    modelId: string;\n''',
+              '''  turn: {\n    traceId: string;\n    sessionId?: string;\n    preserveConnectorSelection?: boolean;\n    modelId: string;\n''',
+              'helper protocol preservation field',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-helper-main.ts',
+              '''  if (message.turn.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(message.turn.sessionId)) {\n    throw new Error("Browser helper session identity is invalid");\n  }\n  const continuation = message.turn.prepared.continuation;\n''',
+              '''  if (message.turn.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(message.turn.sessionId)) {\n    throw new Error("Browser helper session identity is invalid");\n  }\n  if (message.turn.preserveConnectorSelection !== undefined\n    && typeof message.turn.preserveConnectorSelection !== "boolean") {\n    throw new Error("Browser helper connector preservation flag is invalid");\n  }\n  const continuation = message.turn.prepared.continuation;\n''',
+              'helper protocol preservation validation',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-helper-main.ts',
+              '''  const turn: BrowserTurn = {\n    traceId: message.turn.traceId,\n    ...(message.turn.sessionId ? { sessionId: message.turn.sessionId } : {}),\n    modelId: message.turn.modelId,\n''',
+              '''  const turn: BrowserTurn = {\n    traceId: message.turn.traceId,\n    ...(message.turn.sessionId ? { sessionId: message.turn.sessionId } : {}),\n    ...(message.turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),\n    modelId: message.turn.modelId,\n''',
+              'helper turn preservation propagation',
+          )
+
+          test_path = Path('tests/persistent-session.test.ts')
+          tests = test_path.read_text()
+          marker = 'test("native compaction preserves an existing connector selection across the read-only checkpoint"'
+          if marker not in tests:
+              tests += '''\n\ntest("native compaction preserves an existing connector selection across the read-only checkpoint", () => {\n  const workerSource = readFileSync(\n    new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url),\n    "utf8",\n  );\n  const adapterSource = readFileSync(\n    new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),\n    "utf8",\n  );\n  const helperClientSource = readFileSync(\n    new URL("../src/adapters/chatgpt-web/launcher-helper-client.ts", import.meta.url),\n    "utf8",\n  );\n  const helperMainSource = readFileSync(\n    new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url),\n    "utf8",\n  );\n\n  expect(adapterSource).toContain("...(parsed._compactionRequest ? { preserveConnectorSelection: true } : {}),");\n  expect(workerSource).toContain("preserveConnectorSelection?: boolean;");\n  expect(workerSource).toContain(\n    "const preserveConnector = preserveConnectorSelection && await this.connectorIsSelected(composer);",\n  );\n  expect(workerSource).toContain("connector-preserved-for-read-only-checkpoint");\n  expect(workerSource).toContain("if (existingText.length > 0)");\n  expect(helperClientSource).toContain(\n    "...(turn.preserveConnectorSelection ? { preserveConnectorSelection: true } : {}),",\n  );\n  expect(helperMainSource).toContain("preserveConnectorSelection?: boolean;");\n  expect(helperMainSource).toContain("Browser helper connector preservation flag is invalid");\n});\n'''
+              test_path.write_text(tests)
+
+          for path in [
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              'src/adapters/chatgpt-web/index.ts',
+              'src/adapters/chatgpt-web/launcher-helper-client.ts',
+              'src/adapters/chatgpt-web/browser-helper-main.ts',
+              'tests/persistent-session.test.ts',
+          ]:
+              text = Path(path).read_text()
+              if 'preserveConnectorSelection' not in text:
+                  raise SystemExit(f'missing preservation marker in {path}')
+          PY
+          git diff --check
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          if [[ -f launcher/bun.lock || -f launcher/bun.lockb ]]; then
+            (cd launcher && bun install --frozen-lockfile)
+          fi
+
+      - name: Focused regression
+        run: bun test tests/persistent-session.test.ts
+
+      - name: Full verification
+        run: bun run verify
+
+      - name: Commit verified fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            src/adapters/chatgpt-web/browser-worker.ts \
+            src/adapters/chatgpt-web/index.ts \
+            src/adapters/chatgpt-web/launcher-helper-client.ts \
+            src/adapters/chatgpt-web/browser-helper-main.ts \
+            tests/persistent-session.test.ts
+          git commit -m "Preserve Codex Native across browser compaction"
+          git push origin HEAD:lyndon/preserve-connector-through-compaction
