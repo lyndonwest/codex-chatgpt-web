@@ -940,220 +940,22 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.close();
   });
 
-  test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {
-    const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
+  test("routes native Codex compaction above the browser adapter", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-native-compact-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt",
       chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
     };
-    const worker = ChatGptBrowserWorker.forProvider(provider);
-    const originalRun = worker.run.bind(worker);
-    let browserStarts = 0;
-    let originalTurnToken = "";
-    let continuationTurnToken = "";
-    let originalBrowserStopped = false;
-    let originalBrowserReceivedToolResult = false;
-    let compactionPrompt = "";
-    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
-      browserStarts += 1;
-      const prepared = await turn.prepare();
-      try {
-        if (prepared.text.includes("history-compaction checkpoint")) {
-          compactionPrompt = prepared.text;
-          const compactSummary = "The project was inspected and the pending command completed.";
-          turn.onTextDelta(compactSummary);
-          return compactSummary;
-        }
-        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
-        if (!token) throw new Error("turn token missing from compiled prompt");
-        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
-        if (prepared.text.includes("The project was inspected and the pending command completed.")) {
-          continuationTurnToken = token;
-          turn.onReasoningSummary?.("Resumed from the compacted Codex history");
-          const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
-            method: "invoke",
-            bindingId: claimed.bindingId,
-            wireName: "exec_command",
-            freeform: false,
-            arguments: { cmd: "git status --short", workdir: tempRoot },
-          }, 30_000);
-          turn.onReasoningSummary?.("Verified the continued task");
-          const answer = `## Browser final\n\nStatus: ${(nativeResult.structuredContent as { output: string }).output}`;
-          turn.onTextDelta("## Browser final");
-          turn.onTextDelta(`\n\nStatus: ${(nativeResult.structuredContent as { output: string }).output}`);
-          return answer;
-        }
-
-        originalTurnToken = token;
-        turn.onReasoningSummary?.("Mapped the repository surface");
-        turn.onReasoningSummary?.("Inspected the working directory");
-        try {
-          const nativeResult = await callTurnBroker<BrokerToolResult>(socketPath, {
-            method: "invoke",
-            bindingId: claimed.bindingId,
-            wireName: "exec_command",
-            freeform: false,
-            arguments: { cmd: "pwd", workdir: tempRoot },
-          }, 30_000);
-          originalBrowserReceivedToolResult = true;
-          return `stale browser continued with ${(nativeResult.structuredContent as { output: string }).output}`;
-        } catch (error) {
-          originalBrowserStopped = turn.abortSignal?.aborted === true
-            && error instanceof Error
-            && error.message.includes("revoked");
-          throw error;
-        }
-      } finally {
-        prepared.release();
-      }
-    };
-
     const adapter = createChatGptWebAdapter(provider);
-    const firstRequest = rawWireRequest(environmentXml);
-    const firstEvents: AdapterEvent[] = [];
-    const secondEvents: AdapterEvent[] = [];
+    const compactRequest = rawWireRequest(environmentXml);
+    compactRequest._compactionRequest = true;
+    const compactEvents: AdapterEvent[] = [];
     try {
-      await adapter.runTurn!(firstRequest, { headers: new Headers() }, event => firstEvents.push(event));
-      const callStart = firstEvents.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
-      expect(callStart?.name).toBe("exec_command");
-      expect(firstEvents.filter(event => event.type === "assistant_boundary")).toHaveLength(2);
-      expect(firstEvents.filter(event => event.type === "thinking_delta")).toEqual([
-        { type: "thinking_delta", thinking: "Mapped the repository surface" },
-        { type: "thinking_delta", thinking: "Inspected the working directory" },
-      ]);
-      const firstDone = firstEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
-      expect(firstDone).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
-      expect(firstDone.usage?.estimated).toBe(true);
-      expect(Number.isFinite(firstDone.usage?.inputTokens)).toBe(true);
-      expect(Number.isFinite(firstDone.usage?.outputTokens)).toBe(true);
-      const firstResponse = buildResponseJSON(firstEvents, "gpt-5.6-sol") as { output: Array<Record<string, unknown>>; usage: { total_tokens: number } };
-      expect(firstResponse.usage.total_tokens).toBeGreaterThan(0);
-      expect(firstResponse.output.map(item => item.type)).toEqual(["reasoning", "reasoning", "function_call"]);
-      expect(firstResponse.output[2]).toMatchObject({
-        type: "function_call",
-        call_id: callStart!.id,
-        name: "exec_command",
-        status: "completed",
-      });
-
-      const compactRequest = rawWireRequest(environmentXml);
-      compactRequest._compactionRequest = true;
-      const toolCall = {
-        role: "assistant" as const,
-        content: [{ type: "toolCall" as const, id: callStart!.id, name: "exec_command", arguments: { cmd: "pwd", workdir: tempRoot } }],
-        timestamp: 3,
-      };
-      const result = {
-        role: "toolResult" as const,
-        toolCallId: callStart!.id,
-        toolName: "exec_command",
-        content: JSON.stringify({ output: tempRoot, exit_code: 0 }),
-        isError: false,
-        timestamp: 4,
-      };
-      compactRequest.context.messages.push(toolCall, result);
-      ((compactRequest._rawBody as { input: unknown[] }).input).push(
-        {
-          type: "function_call",
-          call_id: callStart!.id,
-          name: "exec_command",
-          arguments: JSON.stringify({ cmd: "pwd", workdir: tempRoot }),
-        },
-        {
-          type: "function_call_output",
-          call_id: callStart!.id,
-          output: result.content,
-        },
-      );
-      const compactEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(compactRequest, { headers: new Headers() }, event => compactEvents.push(event));
-      expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
-      expect(originalBrowserStopped).toBe(true);
-      expect(originalBrowserReceivedToolResult).toBe(false);
-      expect(compactionPrompt).toContain(`"tool_call_id":"${callStart!.id}"`);
-      expect(compactionPrompt).toContain('"role":"tool_result"');
-
-      const secondRequest = rawWireRequest(environmentXml);
-      secondRequest.context.messages.push({
-        role: "user",
-        content: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.`,
-        timestamp: 5,
-      });
-      ((secondRequest._rawBody as { input: unknown[] }).input).push({
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.` }],
-      });
-      await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
-      expect(browserStarts).toBe(3);
-      expect(continuationTurnToken).not.toBe(originalTurnToken);
-      expect(secondEvents.find(event => event.type === "thinking_delta")).toEqual({
-        type: "thinking_delta",
-        thinking: "Resumed from the compacted Codex history",
-      });
-      const continuedCall = secondEvents.find(
-        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
-      );
-      expect(continuedCall?.name).toBe("exec_command");
-      expect(secondEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
-
-      const finalRequest = structuredClone(secondRequest);
-      const continuedToolCall = {
-        role: "assistant" as const,
-        content: [{
-          type: "toolCall" as const,
-          id: continuedCall!.id,
-          name: "exec_command",
-          arguments: { cmd: "git status --short", workdir: tempRoot },
-        }],
-        timestamp: 6,
-      };
-      const continuedResult = {
-        role: "toolResult" as const,
-        toolCallId: continuedCall!.id,
-        toolName: "exec_command",
-        content: JSON.stringify({ output: "clean", exit_code: 0 }),
-        isError: false,
-        timestamp: 7,
-      };
-      finalRequest.context.messages.push(continuedToolCall, continuedResult);
-      ((finalRequest._rawBody as { input: unknown[] }).input).push(
-        {
-          type: "function_call",
-          call_id: continuedCall!.id,
-          name: "exec_command",
-          arguments: JSON.stringify({ cmd: "git status --short", workdir: tempRoot }),
-        },
-        {
-          type: "function_call_output",
-          call_id: continuedCall!.id,
-          output: continuedResult.content,
-        },
-      );
-      const finalEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => finalEvents.push(event));
-      expect(browserStarts).toBe(3);
-      expect(finalEvents.find(event => event.type === "thinking_delta")).toEqual({
-        type: "thinking_delta",
-        thinking: "Verified the continued task",
-      });
-      expect(finalEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
-        .map(event => event.text).join(""))
-        .toBe("## Browser final\n\nStatus: clean");
-      const finalDone = finalEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
-      expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
-      expect(finalDone.usage?.estimated).toBe(true);
-      expect(Number.isFinite(finalDone.usage?.inputTokens)).toBe(true);
-      expect(Number.isFinite(finalDone.usage?.outputTokens)).toBe(true);
-      expect(finalDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens);
-
-      const replayEvents: AdapterEvent[] = [];
-      await adapter.runTurn!(finalRequest, { headers: new Headers() }, event => replayEvents.push(event));
-      expect(browserStarts).toBe(3);
-      expect(replayEvents).toEqual(finalEvents);
+      await expect(adapter.runTurn!(compactRequest, { headers: new Headers() }, event => compactEvents.push(event)))
+        .rejects.toThrow("must be handled by the bridge without opening or retiring a browser turn");
+      expect(compactEvents).toEqual([]);
     } finally {
-      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
     }
   });

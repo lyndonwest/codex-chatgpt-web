@@ -3,9 +3,12 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
-import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import {
+  continueChatGptWebAcrossNativeCompaction,
+  createChatGptWebAdapter,
+} from "../src/adapters/chatgpt-web/index";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
@@ -63,7 +66,43 @@ function request(turnId = "turn_test_123"): CodexParsedRequest {
   };
 }
 
-test("changed-key tool-result round rejoins the live persistent browser execution", async () => {
+function appendToolResult(parsed: CodexParsedRequest, callId: string): void {
+  const toolCall = {
+    role: "assistant" as const,
+    content: [{
+      type: "toolCall" as const,
+      id: callId,
+      name: "write_stdin",
+      arguments: { session_id: 42, chars: "" },
+    }],
+    timestamp: 2,
+  };
+  const result = {
+    role: "toolResult" as const,
+    toolCallId: callId,
+    toolName: "write_stdin",
+    content: JSON.stringify({ output: "command complete", exit_code: 0 }),
+    isError: false,
+    timestamp: 3,
+  };
+  parsed.context.messages.push(toolCall, result);
+  const raw = parsed._rawBody as { input: unknown[] };
+  raw.input.push(
+    {
+      type: "function_call",
+      call_id: callId,
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: 42, chars: "" }),
+    },
+    {
+      type: "function_call_output",
+      call_id: callId,
+      output: result.content,
+    },
+  );
+}
+
+test("native Codex compaction delivers completed tool results and leaves the Web execution running", async () => {
   const socketPath = brokerEndpoint();
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -115,45 +154,19 @@ test("changed-key tool-result round rejoins the live persistent browser executio
     expect(callStart?.name).toBe("write_stdin");
     expect(firstEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
 
-    const resultRequest = request("turn_test_tool_result_456");
-    const toolCall = {
-      role: "assistant" as const,
-      content: [{
-        type: "toolCall" as const,
-        id: callStart!.id,
-        name: "write_stdin",
-        arguments: { session_id: 42, chars: "" },
-      }],
-      timestamp: 2,
-    };
-    const result = {
-      role: "toolResult" as const,
-      toolCallId: callStart!.id,
-      toolName: "write_stdin",
-      content: JSON.stringify({ output: "command complete", exit_code: 0 }),
-      isError: false,
-      timestamp: 3,
-    };
-    resultRequest.context.messages.push(toolCall, result);
-    const raw = resultRequest._rawBody as { input: unknown[] };
-    raw.input.push(
-      {
-        type: "function_call",
-        call_id: callStart!.id,
-        name: "write_stdin",
-        arguments: JSON.stringify({ session_id: 42, chars: "" }),
-      },
-      {
-        type: "function_call_output",
-        call_id: callStart!.id,
-        output: result.content,
-      },
-    );
+    const compactRequest = request("turn_compaction_456");
+    compactRequest._compactionRequest = true;
+    appendToolResult(compactRequest, callStart!.id);
 
-    expect(chatGptTurnExecutionKey(resultRequest)).not.toBe(chatGptTurnExecutionKey(firstRequest));
+    const continued = await continueChatGptWebAcrossNativeCompaction(compactRequest, provider);
+    expect(continued).toEqual({ activeBrowserSession: true, deliveredToolResults: 1 });
+    expect(browserStarts).toBe(1);
+
+    const postCompactRequest = request("turn_after_compaction_789");
+    expect(chatGptTurnExecutionKey(postCompactRequest)).not.toBe(chatGptTurnExecutionKey(firstRequest));
 
     const resultEvents: AdapterEvent[] = [];
-    await adapter.runTurn!(resultRequest, { headers: new Headers() }, event => resultEvents.push(event));
+    await adapter.runTurn!(postCompactRequest, { headers: new Headers() }, event => resultEvents.push(event));
 
     expect(browserStarts).toBe(1);
     expect(resultEvents.filter(
@@ -161,6 +174,7 @@ test("changed-key tool-result round rejoins the live persistent browser executio
     ).map(event => event.text).join("")).toBe("Tool result resumed: command complete");
     expect(resultEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {
+    chatGptTurnSessions.clear();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     await TurnBroker.forSocket(socketPath).close();
   }

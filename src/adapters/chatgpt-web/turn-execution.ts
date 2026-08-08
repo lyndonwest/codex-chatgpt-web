@@ -212,6 +212,7 @@ export class ChatGptTurnSession {
   private outstandingPrelude: AdapterEvent[] = [];
   private finalPrelude: AdapterEvent[] = [];
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
+  private nativeCompactionResumePending = false;
   private tail: Promise<void> = Promise.resolve();
 
   constructor(readonly runtime: ChatGptTurnRuntime, readonly browserSessionId?: string) {
@@ -249,6 +250,20 @@ export class ChatGptTurnSession {
 
   isActive(): boolean {
     return this.settledBrowserOutcome === undefined;
+  }
+
+  markNativeCompactionBoundary(): void {
+    this.nativeCompactionResumePending = true;
+    this.touch();
+  }
+
+  hasNativeCompactionBoundary(): boolean {
+    return this.nativeCompactionResumePending;
+  }
+
+  clearNativeCompactionBoundary(): void {
+    this.nativeCompactionResumePending = false;
+    this.touch();
   }
 
   setOutstanding(requests: BrokerToolRequest[], reasoning: string[] = [], prelude: AdapterEvent[] = []): void {
@@ -348,6 +363,21 @@ export class ChatGptTurnSessions {
       active = { key, session };
     }
     return active;
+  }
+
+  nativeCompactionContinuationForBrowserSession(
+    browserSessionId: string,
+  ): { key: string; session: ChatGptTurnSession } | undefined {
+    this.prune();
+    let continuation: { key: string; session: ChatGptTurnSession } | undefined;
+    for (const [key, session] of this.entries) {
+      if (session.browserSessionId !== browserSessionId || !session.hasNativeCompactionBoundary()) continue;
+      if (continuation) {
+        throw new Error(`ChatGPT browser session ${browserSessionId} has multiple native-compaction continuations`);
+      }
+      continuation = { key, session };
+    }
+    return continuation;
   }
 
   async waitForRetirement(key: string): Promise<void> {
