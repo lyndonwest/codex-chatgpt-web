@@ -81,11 +81,21 @@ jobs:
           worker = Path('src/adapters/chatgpt-web/browser-worker.ts')
           text = worker.read_text()
           old_estimate = '''      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);\n      assertChatGptWebInputWithinContextWindow(\n        estimatedInputTokens,\n        requestedMode.effort,\n      );\n'''
-          effective_estimate = 'const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId);'
           if old_estimate in text:
               text = text.replace(old_estimate, '', 1)
-          elif effective_estimate not in text:
-              raise SystemExit('browser worker has neither old nor effective input-token estimate')
+
+          effective_estimate = '      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId);\n'
+          if effective_estimate not in text:
+              anchor = '''      diagnosticPage = page;\n      await diagnostics.capture(page, "browser-page-acquired");\n'''
+              if text.count(anchor) != 1:
+                  raise SystemExit(f'effective usage insertion anchor count={text.count(anchor)}')
+              text = text.replace(
+                  anchor,
+                  anchor
+                  + effective_estimate
+                  + '      assertChatGptWebInputWithinContextWindow(estimatedInputTokens, requestedMode.effort);\n',
+                  1,
+              )
           worker.write_text(text)
 
           ensure_replace(
