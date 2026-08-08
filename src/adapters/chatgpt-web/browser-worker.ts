@@ -1042,17 +1042,110 @@ export class ChatGptBrowserWorker {
       + `; visible rows: ${titles.map(title => JSON.stringify(title)).join(", ")}`;
   }
 
+  private async selectConnectorFromToolsMenu(
+    page: Page,
+    composer: Locator,
+    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+  ): Promise<Locator | undefined> {
+    const composerForm = composer.locator("xpath=ancestor::form[1]");
+    const triggerSelectors = [
+      'button[data-testid="composer-plus-btn"]',
+      'button[aria-label="Add photos & files"]',
+      'button[aria-label="Add photos and files"]',
+      'button[aria-label="Tools"]',
+    ];
+    let trigger: Locator | undefined;
+    for (const selector of triggerSelectors) {
+      const candidate = composerForm.locator(selector).filter({ visible: true });
+      const count = await candidate.count();
+      if (count > 1) {
+        throw new Error(`ChatGPT composer exposed duplicate connector tools controls for ${selector}`);
+      }
+      if (count === 1) {
+        trigger = candidate.first();
+        break;
+      }
+    }
+    if (!trigger) return undefined;
+
+    await trigger.click();
+    await captureDiagnostic?.("connector-tools-menu-triggered");
+    const menuWithMore = page
+      .locator('[role="menu"], [role="listbox"]')
+      .filter({ visible: true })
+      .filter({ has: page.getByText("More", { exact: true }) });
+    try {
+      await menuWithMore.first().waitFor({ state: "visible", timeout: 5_000 });
+    } catch {
+      await page.keyboard.press("Escape").catch(() => {});
+      await captureDiagnostic?.("connector-tools-menu-missing");
+      return undefined;
+    }
+    if (await menuWithMore.count() !== 1) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await captureDiagnostic?.("connector-tools-menu-ambiguous");
+      return undefined;
+    }
+
+    const more = menuWithMore.first().getByText("More", { exact: true }).filter({ visible: true });
+    if (await more.count() !== 1) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await captureDiagnostic?.("connector-tools-more-missing");
+      return undefined;
+    }
+    await more.dispatchEvent("click");
+    await captureDiagnostic?.("connector-tools-more-opened");
+
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const appContainers = page
+        .locator('[role="menu"], [role="listbox"], [role="dialog"]')
+        .filter({ visible: true })
+        .filter({ has: page.getByText(this.config.appName, { exact: true }) });
+      const containerCount = await appContainers.count();
+      if (containerCount > 0) {
+        const appLabels = appContainers
+          .last()
+          .getByText(this.config.appName, { exact: true })
+          .filter({ visible: true });
+        const labelCount = await appLabels.count();
+        if (labelCount === 1) {
+          await appLabels.first().dispatchEvent("click");
+          const selectedComposer = await this.activeComposer(page);
+          const selectedConnector = this.selectedConnectorControl(selectedComposer);
+          await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
+          if (!await this.connectorIsSelected(selectedComposer)) {
+            throw new Error(`ChatGPT tools menu did not select ${JSON.stringify(this.config.appName)} connector`);
+          }
+          await captureDiagnostic?.("connector-tools-app-selected");
+          return selectedComposer;
+        }
+      }
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+    }
+
+    await page.keyboard.press("Escape").catch(() => {});
+    await captureDiagnostic?.("connector-tools-app-missing");
+    return undefined;
+  }
+
   private async selectConnector(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
-    await composer.fill("");
     if (await this.connectorIsSelected(composer)) {
       await captureDiagnostic?.("connector-already-selected");
       return composer;
     }
+    await composer.fill("");
 
+    const toolsSelected = await this.selectConnectorFromToolsMenu(page, composer, captureDiagnostic);
+    if (toolsSelected) return toolsSelected;
+
+    // Keep @ mention as a compatibility fallback for ChatGPT surfaces that do not expose
+    // the documented + -> More app picker. The existing mention loop re-resolves and clears
+    // the composer on every attempt.
     const menuRows = page.locator('.__menu-item[tabindex="0"]');
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),

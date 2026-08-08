@@ -193,6 +193,7 @@ function compileChatGptWebContinuationPrompt(
         "Do not call local tools, the Codex Native connector, web search, or any other tool.",
         "Summarize the task state already present in this conversation so another Codex model can resume it.",
         "Preserve active instructions, decisions, completed work, unresolved work, important paths/identifiers, and any tool results needed to continue.",
+        "Keep the checkpoint concise and information-dense: use dense bullets where practical, aim for roughly 800-1,200 words, and never exceed 1,500 words.",
         "Return only the checkpoint summary.",
       ].join("\n"),
       images: [],
