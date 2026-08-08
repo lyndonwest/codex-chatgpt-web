@@ -22,8 +22,8 @@ jobs:
 
       - name: Apply staged patch
         run: |
-          git apply --check patches/persistent-web-sessions.patch
-          git apply patches/persistent-web-sessions.patch
+          git apply --recount --check patches/persistent-web-sessions.patch
+          git apply --recount patches/persistent-web-sessions.patch
           git diff --check
 
       - uses: oven-sh/setup-bun@v2
