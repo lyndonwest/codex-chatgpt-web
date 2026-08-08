@@ -195,6 +195,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       const runBrowser = () => worker.run({
         traceId,
         ...(sessionId ? { sessionId } : {}),
+        ...(parsed._compactionRequest ? { preserveConnectorSelection: true } : {}),
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,

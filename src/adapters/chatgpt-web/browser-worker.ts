@@ -201,6 +201,7 @@ export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 200_000;
 export interface BrowserTurn {
   traceId: string;
   sessionId?: string;
+  preserveConnectorSelection?: boolean;
   modelId: string;
   reasoning?: string;
   capabilities: ChatGptWebCapabilities;
@@ -1114,15 +1115,28 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
+    preserveConnectorSelection: boolean,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<void> {
     if (!localTools) {
       const composer = await this.activeComposer(page);
-      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-      // then transport the complete text in one CDP Input.insertText command.
-      await composer.fill("");
+      const preserveConnector = preserveConnectorSelection && await this.connectorIsSelected(composer);
+      if (preserveConnector) {
+        const existingText = await this.attachedPromptText(page);
+        if (existingText.length > 0) {
+          throw new Error(
+            `Cannot preserve ${JSON.stringify(this.config.appName)} connector with non-empty composer text`,
+          );
+        }
+        await captureDiagnostic?.("connector-preserved-for-read-only-checkpoint");
+      } else {
+        // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
+        // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
+        // then transport the complete text in one CDP Input.insertText command.
+        await composer.fill("");
+      }
       await composer.focus();
+      if (preserveConnector) await composer.press("End");
       await this.insertPromptText(page, prompt);
       await this.assertPromptAttached(page, prompt);
       return;
@@ -1537,7 +1551,13 @@ export class ChatGptBrowserWorker {
       ));
       await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
-        this.attachPrompt(page, effectivePrepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
+        this.attachPrompt(
+          page,
+          effectivePrepared.text,
+          mode.localTools,
+          turn.preserveConnectorSelection === true,
+          checkpoint => diagnostics.capture(page, checkpoint),
+        )
       ));
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
