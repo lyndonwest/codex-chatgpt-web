@@ -20,10 +20,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply staged patch
+      - name: Normalize and apply staged patch
         run: |
-          patch --dry-run --batch --forward --fuzz=2 -p1 < patches/persistent-web-sessions.patch
-          patch --batch --forward --fuzz=2 -p1 < patches/persistent-web-sessions.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path('patches/persistent-web-sessions.patch')
+          lines = source.read_text().splitlines(keepends=True)
+          out = []
+          i = 0
+          header = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$')
+          while i < len(lines):
+              line = lines[i]
+              match = header.match(line.rstrip('\n'))
+              if not match:
+                  out.append(line)
+                  i += 1
+                  continue
+              body = []
+              i += 1
+              while i < len(lines) and not lines[i].startswith('@@ ') and not lines[i].startswith('diff --git '):
+                  body.append(lines[i])
+                  i += 1
+              old_count = sum(1 for item in body if item.startswith((' ', '-')) and not item.startswith('--- '))
+              new_count = sum(1 for item in body if item.startswith((' ', '+')) and not item.startswith('+++ '))
+              out.append(f'@@ -{match.group(1)},{old_count} +{match.group(2)},{new_count} @@{match.group(3)}\n')
+              out.extend(body)
+          Path('/tmp/persistent-web-sessions.normalized.patch').write_text(''.join(out))
+          PY
+          patch --dry-run --batch --forward --fuzz=2 -p1 < /tmp/persistent-web-sessions.normalized.patch
+          patch --batch --forward --fuzz=2 -p1 < /tmp/persistent-web-sessions.normalized.patch
           git diff --check
 
       - uses: oven-sh/setup-bun@v2
