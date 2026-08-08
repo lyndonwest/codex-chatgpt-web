@@ -73,6 +73,12 @@ jobs:
 
           ensure_replace(
               'src/adapters/chatgpt-web/browser-worker.ts',
+              '      return await this.runBrowserTurn(turn, surfaceId);',
+              '      return await this.runBrowserTurn(turn, surfaceId, lease.reused === true);',
+              'launcher reuse propagation',
+          )
+          ensure_replace(
+              'src/adapters/chatgpt-web/browser-worker.ts',
               '  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {',
               '  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string, reuseExistingChat = false): Promise<string> {',
               'persistent browser-turn signature',
@@ -83,6 +89,13 @@ jobs:
           old_estimate = '''      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);\n      assertChatGptWebInputWithinContextWindow(\n        estimatedInputTokens,\n        requestedMode.effort,\n      );\n'''
           if old_estimate in text:
               text = text.replace(old_estimate, '', 1)
+
+          effective_block = '''      if (reuseExistingChat && !prepared.continuation) {\n        throw new Error("Persistent ChatGPT browser session has no incremental continuation prompt");\n      }\n      const effectivePrepared = reuseExistingChat ? prepared.continuation! : prepared;\n'''
+          if effective_block not in text:
+              anchor = '      if (launcherSurfaceId) await ensureChatGptOperationalViewport(page);\n'
+              if text.count(anchor) != 1:
+                  raise SystemExit(f'effective prompt selection anchor count={text.count(anchor)}')
+              text = text.replace(anchor, anchor + effective_block, 1)
 
           effective_estimate = '      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId);\n'
           if effective_estimate not in text:
@@ -120,6 +133,8 @@ jobs:
               'src/adapters/chatgpt-web/index.ts': [':browser-thread:', 'persistentSessionId'],
               'src/adapters/chatgpt-web/browser-worker.ts': [
                   'sessionId?: string',
+                  'lease.reused === true',
+                  'const effectivePrepared = reuseExistingChat ? prepared.continuation! : prepared',
                   'persistent_chat_settle',
                   'persistent=${reuseExistingChat}',
                   'estimateCompiledChatGptWebInputTokens(effectivePrepared, turn.modelId)',
