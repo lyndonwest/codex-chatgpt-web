@@ -300,13 +300,29 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
-      const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      let executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      const persistentSessionId = browserSessionId(parsed);
+      if (!parsed._compactionRequest && persistentSessionId) {
+        const activeBrowserExecution = chatGptTurnSessions.activeForBrowserSession(persistentSessionId);
+        if (activeBrowserExecution && activeBrowserExecution.key !== executionKey) {
+          const matchingToolResults = currentToolResults(parsed, activeBrowserExecution.session);
+          if (activeBrowserExecution.session.outstanding().length > 0 && matchingToolResults.length > 0) {
+            console.warn(
+              `[chatgpt-web] rebound changed-key tool-result round to active browser execution `
+              + `(browser_session=${persistentSessionId}, matching_results=${matchingToolResults.length})`,
+            );
+            executionKey = activeBrowserExecution.key;
+          } else {
+            await chatGptTurnSessions.retireAndWait(activeBrowserExecution.key);
+          }
+        }
+      }
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
-      const persistentSessionId = browserSessionId(parsed);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId),
+        persistentSessionId,
       );
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
