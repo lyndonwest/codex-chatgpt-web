@@ -1,0 +1,45 @@
+name: Stage native-only compaction
+
+on:
+  push:
+    branches:
+      - lyndon/native-only-compaction
+    paths:
+      - .github/workflows/stage-native-only-compaction.yml
+      - scripts/stage-native-only-compaction.py
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: lyndon/native-only-compaction
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+      - name: Apply native-only compaction patch
+        run: python3 scripts/stage-native-only-compaction.py
+      - name: Run focused regressions
+        run: bun test tests/server-compaction.test.ts tests/persistent-tool-result-rebind.test.ts tests/native-compaction-summary.test.ts
+      - name: Run full verification
+        run: bun run verify
+      - name: Check diff
+        run: git diff --check
+      - name: Commit verified source changes
+        shell: bash
+        run: |
+          rm .github/workflows/stage-native-only-compaction.yml
+          rm scripts/stage-native-only-compaction.py
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Decouple Codex compaction from persistent Web sessions"
+          git push origin HEAD:lyndon/native-only-compaction
