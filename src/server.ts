@@ -1,4 +1,4 @@
-import { createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { continueChatGptWebAcrossNativeCompaction, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
@@ -21,7 +21,7 @@ import {
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
-  COMPACT_PROMPT,
+  buildNativeOnlyCompactionSummary,
   decodeCompactionSummary,
   extractCompactUserMessages,
 } from "./responses/compaction";
@@ -255,13 +255,65 @@ export async function responseRequest(
 
   const compaction = parsed._compactionRequest === true;
   if (compaction) {
-    // History compaction is a dedicated summarization turn. It must never bind the active Codex
-    // tool bridge or continue an in-flight MCP round; the returned summary becomes the next turn's
-    // replacement history through the Responses compaction contract.
-    delete parsed.context.tools;
-    delete parsed.options.toolChoice;
-    delete parsed.options.parallelToolCalls;
-    parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
+    const provider = providerConfig(config);
+    let continuation: { activeBrowserSession: boolean; deliveredToolResults: number };
+    try {
+      continuation = await continueChatGptWebAcrossNativeCompaction(parsed, provider);
+    } catch (error) {
+      return formatErrorResponse(
+        502,
+        "upstream_error",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    const rawBody = parsed._rawBody && typeof parsed._rawBody === "object" && !Array.isArray(parsed._rawBody)
+      ? parsed._rawBody as { input?: unknown }
+      : {};
+    const summary = buildNativeOnlyCompactionSummary(rawBody.input);
+    const events: AdapterEvent[] = [
+      { type: "text_delta", text: summary, phase: "final_answer" },
+      {
+        type: "done",
+        stopReason: "stop",
+        endTurn: true,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: true },
+      },
+    ];
+    const responseModel = route.slug;
+    console.warn(
+      `[chatgpt-web] handled native Codex compaction without browser turn `
+      + `(active_browser=${continuation.activeBrowserSession}, delivered_results=${continuation.deliveredToolResults}, summary_chars=${summary.length})`,
+    );
+
+    if (parsed.stream) {
+      const queue = new AsyncEventQueue<AdapterEvent>();
+      for (const event of events) queue.push(event);
+      queue.close();
+      const stream = bridgeToResponsesSSE(
+        queue,
+        responseModel,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        2_000,
+        { hideThinkingSummary: parsed.options.hideThinkingSummary, compaction: true },
+      );
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
+
+    return Response.json(buildResponseJSON(events, responseModel, {
+      hideThinkingSummary: parsed.options.hideThinkingSummary,
+      compaction: true,
+    }));
   }
 
   const adapter = adapterFactory(providerConfig(config));

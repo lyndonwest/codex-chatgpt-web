@@ -112,7 +112,7 @@ test("adapter derives persistent browser identity from native thread metadata wi
     "utf8",
   );
   expect(source).toContain(":browser-thread:");
-  expect(source).toContain("const persistentSessionId = browserSessionId(parsed)");
+  expect(source).toContain("const persistentSessionId = chatGptBrowserSessionId(provider, parsed)");
   expect(source).toContain("startRuntime(parsed, environment, traceId, turnCapabilities, persistentSessionId)");
   expect(source).toContain("const traceId = createHash");
 });

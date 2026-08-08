@@ -10,7 +10,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./env
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionQueue, chatGptCompactionQueueKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionQueue, chatGptCompactionQueueKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
@@ -153,6 +153,63 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
+function executionNamespaceForProvider(provider: CodexProviderConfig): string {
+  return createHash("sha256").update(JSON.stringify({
+    baseUrl: provider.baseUrl,
+    chatgptWeb: provider.chatgptWeb ?? {},
+  })).digest("hex");
+}
+
+export function chatGptBrowserSessionId(
+  provider: CodexProviderConfig,
+  parsed: CodexParsedRequest,
+): string | undefined {
+  const threadId = extractChatGptTurnIdentity(parsed).threadId;
+  if (!threadId) return undefined;
+  return createHash("sha256")
+    .update(`${executionNamespaceForProvider(provider)}:browser-thread:${threadId}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+export async function continueChatGptWebAcrossNativeCompaction(
+  parsed: CodexParsedRequest,
+  provider: CodexProviderConfig,
+): Promise<{ activeBrowserSession: boolean; deliveredToolResults: number }> {
+  const browserSessionId = chatGptBrowserSessionId(provider, parsed);
+  if (!browserSessionId) return { activeBrowserSession: false, deliveredToolResults: 0 };
+  const active = chatGptTurnSessions.activeForBrowserSession(browserSessionId);
+  if (!active) return { activeBrowserSession: false, deliveredToolResults: 0 };
+
+  return active.session.runExclusive(async () => {
+    active.session.markNativeCompactionBoundary();
+    const outstanding = active.session.outstanding();
+    if (outstanding.length === 0) {
+      return { activeBrowserSession: true, deliveredToolResults: 0 };
+    }
+    if (active.session.runtime.mode !== "tools") {
+      throw new Error("Native Codex compaction found outstanding tools on a read-only ChatGPT Web runtime");
+    }
+    const results = currentToolResults(parsed, active.session);
+    if (results.length !== outstanding.length) {
+      throw new Error(
+        `Native Codex compaction carried ${results.length} of ${outstanding.length} completed ChatGPT tool results`,
+      );
+    }
+    const broker = TurnBroker.forSocket(brokerSocketPath(provider));
+    const turnToken = await active.session.runtime.token;
+    for (const message of results) {
+      broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
+      active.session.markResultDelivered(message.toolCallId);
+    }
+    console.warn(
+      `[chatgpt-web] continued live browser execution across native Codex compaction `
+      + `(browser_session=${browserSessionId}, delivered_results=${results.length})`,
+    );
+    return { activeBrowserSession: true, deliveredToolResults: results.length };
+  });
+}
+
 export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = TurnBroker.forSocket(brokerSocketPath(provider));
@@ -161,24 +218,12 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
-  const executionNamespace = createHash("sha256").update(JSON.stringify({
-    baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
-  })).digest("hex");
+  const executionNamespace = executionNamespaceForProvider(provider);
   const environmentStore = new ChatGptThreadEnvironmentStore(
     provider.chatgptWeb?.threadEnvironmentStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
       : undefined,
   );
-
-  const browserSessionId = (parsed: CodexParsedRequest): string | undefined => {
-    const threadId = extractChatGptTurnIdentity(parsed).threadId;
-    if (!threadId) return undefined;
-    return createHash("sha256")
-      .update(`${executionNamespace}:browser-thread:${threadId}`)
-      .digest("hex")
-      .slice(0, 24);
-  };
 
   const startRuntime = (
     parsed: CodexParsedRequest,
@@ -280,6 +325,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
+      if (parsed._compactionRequest) {
+        throw new Error("ChatGPT Web compaction must be handled by the bridge without opening or retiring a browser turn");
+      }
       const turnCapabilities = parsed._compactionRequest
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
@@ -296,24 +344,29 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           throw error;
         }
       }
-      if (parsed._compactionRequest) {
-        const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
-        await chatGptTurnSessions.retireAndWait(responseExecutionKey);
-      }
       let executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
-      const persistentSessionId = browserSessionId(parsed);
-      if (!parsed._compactionRequest && persistentSessionId) {
-        const activeBrowserExecution = chatGptTurnSessions.activeForBrowserSession(persistentSessionId);
-        if (activeBrowserExecution && activeBrowserExecution.key !== executionKey) {
-          const matchingToolResults = currentToolResults(parsed, activeBrowserExecution.session);
-          if (activeBrowserExecution.session.outstanding().length > 0 && matchingToolResults.length > 0) {
-            console.warn(
-              `[chatgpt-web] rebound changed-key tool-result round to active browser execution `
-              + `(browser_session=${persistentSessionId}, matching_results=${matchingToolResults.length})`,
-            );
-            executionKey = activeBrowserExecution.key;
-          } else {
-            await chatGptTurnSessions.retireAndWait(activeBrowserExecution.key);
+      const persistentSessionId = chatGptBrowserSessionId(provider, parsed);
+      if (persistentSessionId) {
+        const compactContinuation = chatGptTurnSessions.nativeCompactionContinuationForBrowserSession(persistentSessionId);
+        if (compactContinuation && compactContinuation.key !== executionKey) {
+          console.warn(
+            `[chatgpt-web] rebound post-compaction provider round to retained browser execution `
+            + `(browser_session=${persistentSessionId})`,
+          );
+          executionKey = compactContinuation.key;
+        } else {
+          const activeBrowserExecution = chatGptTurnSessions.activeForBrowserSession(persistentSessionId);
+          if (activeBrowserExecution && activeBrowserExecution.key !== executionKey) {
+            const matchingToolResults = currentToolResults(parsed, activeBrowserExecution.session);
+            if (activeBrowserExecution.session.outstanding().length > 0 && matchingToolResults.length > 0) {
+              console.warn(
+                `[chatgpt-web] rebound changed-key tool-result round to active browser execution `
+                + `(browser_session=${persistentSessionId}, matching_results=${matchingToolResults.length})`,
+              );
+              executionKey = activeBrowserExecution.key;
+            } else {
+              await chatGptTurnSessions.retireAndWait(activeBrowserExecution.key);
+            }
           }
         }
       }
@@ -352,6 +405,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
+            session.clearNativeCompactionBoundary();
             emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
             return;
           }
@@ -435,6 +489,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 if (session.runtime.text.value() !== next.outcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
+                session.clearNativeCompactionBoundary();
                 emitBrowserCompletion(
                   next.outcome,
                   estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
