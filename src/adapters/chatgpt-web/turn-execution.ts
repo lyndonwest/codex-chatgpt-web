@@ -214,7 +214,7 @@ export class ChatGptTurnSession {
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private tail: Promise<void> = Promise.resolve();
 
-  constructor(readonly runtime: ChatGptTurnRuntime) {
+  constructor(readonly runtime: ChatGptTurnRuntime, readonly browserSessionId?: string) {
     this.browserOutcome = runtime.browser
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
@@ -314,7 +314,11 @@ export class ChatGptTurnSessions {
     private readonly maxEntries = 256,
   ) {}
 
-  getOrCreate(key: string, start: () => ChatGptTurnRuntime): ChatGptTurnSession {
+  getOrCreate(
+    key: string,
+    start: () => ChatGptTurnRuntime,
+    browserSessionId?: string,
+  ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
     if (existing) {
@@ -328,9 +332,22 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start());
+    const session = new ChatGptTurnSession(start(), browserSessionId);
     this.entries.set(key, session);
     return session;
+  }
+
+  activeForBrowserSession(browserSessionId: string): { key: string; session: ChatGptTurnSession } | undefined {
+    this.prune();
+    let active: { key: string; session: ChatGptTurnSession } | undefined;
+    for (const [key, session] of this.entries) {
+      if (session.browserSessionId !== browserSessionId || !session.isActive()) continue;
+      if (active) {
+        throw new Error(`ChatGPT browser session ${browserSessionId} has multiple active executions`);
+      }
+      active = { key, session };
+    }
+    return active;
   }
 
   async waitForRetirement(key: string): Promise<void> {
