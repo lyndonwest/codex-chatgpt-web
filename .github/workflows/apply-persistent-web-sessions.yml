@@ -49,8 +49,81 @@ jobs:
               out.extend(body)
           Path('/tmp/persistent-web-sessions.normalized.patch').write_text(''.join(out))
           PY
-          patch --dry-run --batch --forward --fuzz=2 -p1 < /tmp/persistent-web-sessions.normalized.patch
-          patch --batch --forward --fuzz=2 -p1 < /tmp/persistent-web-sessions.normalized.patch
+
+          # Apply every hunk whose surrounding source still matches. Four known hunks have
+          # shortened hand-staged context and are completed below using exact source replacements.
+          patch --batch --forward --fuzz=2 -p1 < /tmp/persistent-web-sessions.normalized.patch || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              file = Path(path)
+              text = file.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label}: expected exactly one source match in {path}, found {text.count(old)}')
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'src/adapters/chatgpt-web/prompt.ts',
+              '''export interface CompiledChatGptWebPrompt {\n  text: string;\n  images: ChatGptWebPromptImage[];\n}\n''',
+              '''export interface ChatGptWebPromptPayload {\n  text: string;\n  images: ChatGptWebPromptImage[];\n}\n\nexport interface CompiledChatGptWebPrompt extends ChatGptWebPromptPayload {\n  continuation?: ChatGptWebPromptPayload;\n}\n''',
+              'prompt payload interface',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {',
+              '  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string, reuseExistingChat = false): Promise<string> {',
+              'persistent browser-turn signature',
+          )
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '''      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);\n      assertChatGptWebInputWithinContextWindow(\n        estimatedInputTokens,\n        requestedMode.effort,\n      );\n''',
+              '',
+              'remove pre-lease full-prompt estimate',
+          )
+          replace_once(
+              'src/adapters/chatgpt-web/browser-worker.ts',
+              '''      console.info(\n        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,\n      );\n      await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (\n        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)\n      ));\n      await diagnostics.capture(page, "temporary-chat-navigation-complete");\n''',
+              '''      console.info(\n        `[chatgpt-web] browser turn ${turn.traceId} opened (transport=inline, persistent=${reuseExistingChat}, promptChars=${effectivePrepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${effectivePrepared.images.length})`,\n      );\n      if (reuseExistingChat) {\n        await this.runStage(turn.traceId, "persistent_chat_settle", browserStageTimeouts.navigation, () => (\n          this.waitForExistingChatIdle(page)\n        ));\n        await diagnostics.capture(page, "persistent-chat-reused");\n      } else {\n        await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (\n          page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)\n        ));\n        await diagnostics.capture(page, "temporary-chat-navigation-complete");\n      }\n''',
+              'persistent navigation branch',
+          )
+
+          replace_once(
+              'src/adapters/chatgpt-web/browser-helper-main.ts',
+              '''  if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {\n    throw new Error("Browser helper prompt is invalid");\n  }\n''',
+              '''  if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {\n    throw new Error("Browser helper prompt is invalid");\n  }\n  if (message.turn.sessionId !== undefined && !/^[A-Za-z0-9_-]{12,64}$/.test(message.turn.sessionId)) {\n    throw new Error("Browser helper session identity is invalid");\n  }\n  const continuation = message.turn.prepared.continuation;\n  if (continuation !== undefined\n    && (typeof continuation.text !== "string" || !Array.isArray(continuation.images))) {\n    throw new Error("Browser helper continuation prompt is invalid");\n  }\n''',
+              'helper continuation validation',
+          )
+
+          expected = {
+              'src/adapters/chatgpt-web/prompt.ts': [
+                  'continuation?: ChatGptWebPromptPayload',
+                  'Continue the existing Codex task in this same ChatGPT Temporary Chat.',
+              ],
+              'src/adapters/chatgpt-web/index.ts': [':browser-thread:', 'persistentSessionId'],
+              'src/adapters/chatgpt-web/browser-worker.ts': [
+                  'sessionId?: string',
+                  'persistent_chat_settle',
+                  'persistent=${reuseExistingChat}',
+              ],
+              'launcher/electron/browser-host.cjs': [
+                  'browser.session_tab_retained',
+                  'reused: true',
+                  'sessionId = null',
+              ],
+          }
+          for path, markers in expected.items():
+              text = Path(path).read_text()
+              for marker in markers:
+                  if marker not in text:
+                      raise SystemExit(f'missing expected marker {marker!r} in {path}')
+
+          for reject in Path('.').rglob('*.rej'):
+              reject.unlink()
+          PY
+
           git diff --check
 
       - uses: oven-sh/setup-bun@v2
