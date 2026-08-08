@@ -263,6 +263,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   let activeComposerCalls = 0;
   const resolved = await selectConnector.call({
     config: { appName: "Codex Native" },
+    selectConnectorFromToolsMenu: async () => undefined,
     connectorIsSelected: async () => connectorSelected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -333,6 +334,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   let activeComposerCalls = 0;
   await selectConnector.call({
     config: { appName: "Codex Native" },
+    selectConnectorFromToolsMenu: async () => undefined,
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -400,6 +402,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   await attachPrompt.call({
     config: { appName: "Codex Native" },
     selectConnector,
+    selectConnectorFromToolsMenu: async () => undefined,
     insertPromptText,
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
