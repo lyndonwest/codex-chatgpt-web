@@ -1,41 +1,25 @@
 import { expect, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
-import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary } from "../src/responses/compaction";
+import { SUMMARY_PREFIX, decodeCompactionSummary } from "../src/responses/compaction";
 import { compactRequest, responseRequest } from "../src/server";
-import type { CodexProviderConfig } from "../src/types";
-import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
-import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 
 const model = "chatgpt-web/high";
-const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
 
-function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
-  return (provider: CodexProviderConfig): ProviderAdapter => {
-    seenProviders.push(structuredClone(provider));
+function forbiddenBrowserFactory(counter: { calls: number }) {
+  return (): ProviderAdapter => {
+    counter.calls += 1;
     return {
-      name: "test-web-compactor",
-      async runTurn(parsed, _incoming, emit) {
-        expect(parsed._compactionRequest).toBe(true);
-        expect(parsed.context.tools).toBeUndefined();
-        expect(parsed.options.toolChoice).toBeUndefined();
-        expect(parsed.options.parallelToolCalls).toBeUndefined();
-        expect(parsed.context.messages.at(-1)).toMatchObject({ role: "user", content: COMPACT_PROMPT });
-        emit({ type: "text_delta", text: summary, phase: "final_answer" });
-        emit({
-          type: "done",
-          stopReason: "stop",
-          endTurn: true,
-          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, estimated: true },
-        });
+      name: "forbidden-browser-compactor",
+      async runTurn() {
+        throw new Error("browser adapter must not run for ChatGPT Web compaction");
       },
     };
   };
 }
 
-test("compacts ChatGPT Web v1 through a dedicated read-only browser summarization turn", async () => {
-  const providers: CodexProviderConfig[] = [];
-  const config = defaultConfig("full");
+test("v1 compaction is answered locally without opening a browser turn", async () => {
+  const counter = { calls: 0 };
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -43,104 +27,43 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
       model,
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "First request" }] },
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "First answer" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Implementation is halfway complete" }] },
         { type: "message", role: "user", content: [{ type: "input_text", text: "Latest request" }] },
       ],
     }),
-  }), config, compactionAdapterFactory(providers));
+  }), defaultConfig("full"), forbiddenBrowserFactory(counter));
 
   expect(response.status).toBe(200);
-  expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
+  expect(counter.calls).toBe(0);
   const body = await response.json() as { output: Array<{ role: string; content: Array<{ text: string }> }> };
-  expect(body.output.map(item => item.content[0]!.text)).toEqual([
-    "First request",
-    "Latest request",
-    `${SUMMARY_PREFIX}\n${summary}`,
-  ]);
+  expect(body.output.slice(0, 2).map(item => item.content[0]!.text)).toEqual(["First request", "Latest request"]);
+  const summary = body.output.at(-1)!.content[0]!.text;
+  expect(summary.startsWith(`${SUMMARY_PREFIX}\n`)).toBe(true);
+  expect(summary).toContain("Codex-only context checkpoint");
+  expect(summary).toContain("Implementation is halfway complete");
 });
 
-test("preserves canonical Codex turn metadata from the compact endpoint header", async () => {
-  const turnMetadata = { thread_id: "thread_compact", turn_id: "turn_compact" };
-  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-codex-turn-metadata": JSON.stringify(turnMetadata),
-    },
-    body: JSON.stringify({
-      model,
-      input: [{
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "Inspect the project" }],
-        internal_chat_message_metadata_passthrough: { turn_id: turnMetadata.turn_id },
-      }],
-    }),
-  }), defaultConfig("full"), () => ({
-    name: "metadata-check",
-    async runTurn(parsed, _incoming, emit) {
-      expect(extractChatGptTurnIdentity(parsed)).toMatchObject({
-        threadId: turnMetadata.thread_id,
-        turnId: turnMetadata.turn_id,
-      });
-      emit({ type: "text_delta", text: summary, phase: "final_answer" });
-      emit({ type: "done", stopReason: "stop", endTurn: true });
-    },
-  }));
-
-  expect(response.status).toBe(200);
-});
-
-test("compaction identity accepts a historical source message from the pre-compaction turn", async () => {
-  const turnMetadata = { thread_id: "thread_compact", turn_id: "turn_compact" };
-  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-codex-turn-metadata": JSON.stringify(turnMetadata),
-    },
-    body: JSON.stringify({
-      model,
-      input: [{
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "Continue the existing task" }],
-        internal_chat_message_metadata_passthrough: { turn_id: "turn_before_compaction" },
-      }],
-    }),
-  }), defaultConfig("full"), () => ({
-    name: "compaction-identity-check",
-    async runTurn(parsed, _incoming, emit) {
-      expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
-      expect(() => chatGptCompactionSourceExecutionKey(parsed)).not.toThrow();
-      emit({ type: "text_delta", text: summary, phase: "final_answer" });
-      emit({ type: "done", stopReason: "stop", endTurn: true });
-    },
-  }));
-
-  expect(response.status).toBe(200);
-});
-
-test("returns exactly one native compaction item for a ChatGPT Web v2 request", async () => {
-  const providers: CodexProviderConfig[] = [];
-  const config = defaultConfig("full");
+test("v2 compaction returns exactly one local compaction item without browser inference", async () => {
+  const counter = { calls: 0 };
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model,
       stream: false,
-      tool_choice: "auto",
-      parallel_tool_calls: true,
       tools: [{ type: "function", name: "codex_exec", description: "Run", parameters: { type: "object" } }],
-      input: [{ type: "compaction_trigger" }],
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the project" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Found the relevant implementation" }] },
+        { type: "function_call", call_id: "call_1", name: "codex_exec", arguments: "{\"cmd\":\"true\"}" },
+        { type: "function_call_output", call_id: "call_1", output: "{\"exit_code\":0}" },
+        { type: "compaction_trigger" },
+      ],
     }),
-  }), config, compactionAdapterFactory(providers));
+  }), defaultConfig("full"), forbiddenBrowserFactory(counter));
 
   expect(response.status).toBe(200);
-  expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
+  expect(counter.calls).toBe(0);
   const body = await response.json() as {
     status: string;
     output: Array<{ type: string; encrypted_content?: string }>;
@@ -148,21 +71,33 @@ test("returns exactly one native compaction item for a ChatGPT Web v2 request", 
   expect(body.status).toBe("completed");
   expect(body.output).toHaveLength(1);
   expect(body.output[0]!.type).toBe("compaction");
-  expect(decodeCompactionSummary(body.output[0]!.encrypted_content ?? "")).toBe(summary);
+  const summary = decodeCompactionSummary(body.output[0]!.encrypted_content ?? "");
+  expect(summary).toContain("Found the relevant implementation");
+  expect(summary).toContain("function_call_output");
 });
 
-test("streams one compaction item without leaking the summary as a normal assistant message", async () => {
+test("streaming v2 compaction emits one compaction item and no assistant message", async () => {
+  const counter = { calls: 0 };
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model, stream: true, input: [{ type: "compaction_trigger" }] }),
-  }), defaultConfig("full"), compactionAdapterFactory());
+    body: JSON.stringify({
+      model,
+      stream: true,
+      input: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Keep this recovery state" }] },
+        { type: "compaction_trigger" },
+      ],
+    }),
+  }), defaultConfig("full"), forbiddenBrowserFactory(counter));
 
   expect(response.status).toBe(200);
+  expect(counter.calls).toBe(0);
   const sse = await response.text();
   expect(sse).toContain('"type":"compaction"');
+  expect(sse).toContain("response.completed");
   expect(sse).not.toContain("response.output_text.delta");
-  expect(sse.match(/\"type\":\"compaction\"/g)).toHaveLength(2);
+  expect((sse.match(/"type":"compaction"/g) ?? [])).toHaveLength(2);
 });
 
 test("rejects an unknown routed compact model instead of treating it as ChatGPT Web", async () => {
@@ -230,7 +165,7 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
   expect(body.error.message).toContain("rolling checkpoint");
 });
 
-test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
+test("rejects Pro-only routed models before compaction handling when the account has no Pro access", async () => {
   for (const [routedModel, label] of [
     ["chatgpt-web/extra-high", "Extra High"],
     ["chatgpt-web/pro", "Pro"],
@@ -238,42 +173,13 @@ test("rejects Pro-only routed models before opening a browser when the account h
     const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: routedModel, input: "test", stream: false }),
+      body: JSON.stringify({ model: routedModel, input: [{ type: "compaction_trigger" }], stream: false }),
     }), defaultConfig("browser-only"));
 
     expect(response.status).toBe(400);
     const body = await response.json() as { error: { message: string } };
     expect(body.error.message).toContain(`${label} is not available for this account`);
   }
-});
-
-test("preserves a structured browser preflight failure through the v1 compaction endpoint", async () => {
-  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model, input: [] }),
-  }), defaultConfig("browser-only"), () => ({
-    name: "preflight-error",
-    async runTurn(_parsed, _incoming, emit) {
-      emit({
-        type: "error",
-        message: "This task exceeds the ChatGPT Web context window.",
-        status: 400,
-        errorType: "invalid_request_error",
-        code: "context_length_exceeded",
-        retryable: false,
-      });
-    },
-  }));
-
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({
-    error: {
-      message: "This task exceeds the ChatGPT Web context window.",
-      type: "invalid_request_error",
-      code: "context_length_exceeded",
-    },
-  });
 });
 
 test("refuses a ChatGPT Web continuation when local previous-response state is unavailable", async () => {
