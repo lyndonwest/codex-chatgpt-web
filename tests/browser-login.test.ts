@@ -6,6 +6,12 @@ import { browserLoginStateExists, loginToChatGpt, loginVerificationMarkerPath } 
 import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
 import { defaultConfig } from "../src/config";
 
+test("browser login verification reuses the shared composer selector", () => {
+  const source = readFileSync(new URL("../src/browser-login.ts", import.meta.url), "utf8");
+  expect(source).toContain("CHATGPT_COMPOSER_SELECTOR");
+  expect(source).not.toContain('name: "Chat with ChatGPT"');
+});
+
 test("login starts with normal Chrome and captures state in a headed Keychain-aware context", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-login-"));
