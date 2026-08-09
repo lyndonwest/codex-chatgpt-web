@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
 import {
+  CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
+
+test("the composer selector tolerates current textarea and contenteditable variants", () => {
+  expect(CHATGPT_COMPOSER_SELECTOR).toContain('textarea[placeholder]');
+  expect(CHATGPT_COMPOSER_SELECTOR).toContain('[contenteditable="true"]');
+});
 
 test("the effort selector identifies the model slider instead of any composer menu button", () => {
   expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('[data-animated-slider-trigger="true"]');
