@@ -11,7 +11,7 @@ export interface NativeCompactionContinuation {
   browserCompactionRequired: boolean;
 }
 
-/** One live browser execution may survive one native Codex compaction before it must reset. */
+/** One live browser execution may survive one native Codex compaction only to finish an in-flight tool handoff. */
 const preservedNativeCompactions = new WeakSet<ChatGptTurnSession>();
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
@@ -76,26 +76,38 @@ export async function continueChatGptWebAcrossNativeCompaction(
     return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: false };
   }
 
-  // The first native compaction keeps the in-flight ChatGPT response alive. If the same browser
-  // execution reaches native compaction again, its own model context has continued growing even
-  // though Codex replaced its local history. Clear the pending alias and let the existing browser
-  // compaction path retire this response and start a fresh summarization surface instead.
-  if (preservedNativeCompactions.has(active.session)) {
-    chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
-    console.warn(
-      `[chatgpt-web] escalating repeated native Codex compaction to browser compaction `
-      + `(thread=${identity.threadId})`,
-    );
-    return { activeBrowserSession: true, deliveredToolResults: 0, browserCompactionRequired: true };
-  }
-  preservedNativeCompactions.add(active.session);
-
   try {
     return await active.session.runExclusive(async () => {
       const outstanding = active.session.outstanding();
+
+      // Preservation exists only to avoid dropping an already-issued native tool handoff. If the
+      // browser has no unresolved tool call, Codex compaction is already a safe semantic boundary:
+      // retire the near-full browser now and let the dedicated compaction LLM produce the checkpoint.
       if (outstanding.length === 0) {
-        return { activeBrowserSession: true, deliveredToolResults: 0, browserCompactionRequired: false };
+        chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+        preservedNativeCompactions.delete(active.session);
+        chatGptTurnSessions.retire(active.key, active.session);
+        console.warn(
+          `[chatgpt-web] retired browser at native Codex compaction with no outstanding tools `
+          + `(thread=${identity.threadId})`,
+        );
+        return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: false };
       }
+
+      // A browser may cross one compaction only to consume the result of the tool it already asked
+      // for. If it reaches compaction again, stop extending that old model context; the canonical
+      // history already carries the tool evidence for the semantic compaction/fresh-browser path.
+      if (preservedNativeCompactions.has(active.session)) {
+        chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+        preservedNativeCompactions.delete(active.session);
+        chatGptTurnSessions.retire(active.key, active.session);
+        console.warn(
+          `[chatgpt-web] retired browser at repeated native Codex compaction `
+          + `(thread=${identity.threadId}, outstanding_tools=${outstanding.length})`,
+        );
+        return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: true };
+      }
+
       if (active.session.runtime.mode !== "tools") {
         throw new Error("Native Codex compaction found outstanding tools on a read-only ChatGPT Web runtime");
       }
@@ -111,6 +123,7 @@ export async function continueChatGptWebAcrossNativeCompaction(
         broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
         active.session.markResultDelivered(message.toolCallId);
       }
+      preservedNativeCompactions.add(active.session);
       console.warn(
         `[chatgpt-web] continued live browser execution across native Codex compaction `
         + `(thread=${identity.threadId}, delivered_results=${results.length})`,
