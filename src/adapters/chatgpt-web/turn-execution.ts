@@ -172,7 +172,7 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   }
   const candidate = normalTurnExecutionKey(parsed);
   return candidate.threadId
-    ? chatGptTurnSessions.resolveNativeCompactionExecutionKey(candidate.threadId, candidate.key)
+    ? chatGptTurnSessions.resolveNativeCompactionExecutionKey(candidate.threadId, candidate.key, parsed)
     : candidate.key;
 }
 
@@ -347,10 +347,52 @@ export class ChatGptTurnSessions {
     }
   }
 
-  resolveNativeCompactionExecutionKey(threadId: string, candidateExecutionKey: string): string {
+  resolveNativeCompactionExecutionKey(
+    threadId: string,
+    candidateExecutionKey: string,
+    parsed: CodexParsedRequest,
+  ): string {
     const aliasKey = `${threadId}:${candidateExecutionKey}`;
     const existingAlias = this.nativeCompactionAliases.get(aliasKey);
-    if (existingAlias) return existingAlias;
+    if (existingAlias) {
+      let match: { key: string; session: ChatGptTurnSession } | undefined;
+      for (const [key, session] of this.entries) {
+        if (key !== existingAlias && !key.endsWith(`:${existingAlias}`)) continue;
+        if (match) throw new Error(`Native compaction alias ${existingAlias} matched multiple browser executions`);
+        match = { key, session };
+      }
+      if (match) {
+        const outstanding = match.session.outstanding();
+        if (outstanding.length > 0) {
+          const resultIds = new Set<string>();
+          let duplicateResult = false;
+          for (const message of parsed.context.messages) {
+            if (message.role !== "toolResult" || !outstanding.some(request => request.callId === message.toolCallId)) continue;
+            if (resultIds.has(message.toolCallId)) duplicateResult = true;
+            resultIds.add(message.toolCallId);
+          }
+          const completeResultBatch = !duplicateResult
+            && outstanding.every(request => resultIds.has(request.callId));
+          if (completeResultBatch) {
+            for (const [candidateAliasKey, sourceExecutionKey] of this.nativeCompactionAliases) {
+              if (sourceExecutionKey === existingAlias && candidateAliasKey.startsWith(`${threadId}:`)) {
+                this.nativeCompactionAliases.delete(candidateAliasKey);
+              }
+            }
+            if (this.pendingNativeCompaction.get(threadId) === existingAlias) {
+              this.pendingNativeCompaction.delete(threadId);
+            }
+            this.retire(match.key, match.session);
+            console.warn(
+              `[chatgpt-web] refreshed browser execution at post-compaction tool-result boundary `
+              + `(thread=${threadId}, completed_results=${resultIds.size})`,
+            );
+            return candidateExecutionKey;
+          }
+        }
+      }
+      return existingAlias;
+    }
     const sourceExecutionKey = this.pendingNativeCompaction.get(threadId);
     if (!sourceExecutionKey) return candidateExecutionKey;
     this.pendingNativeCompaction.delete(threadId);
