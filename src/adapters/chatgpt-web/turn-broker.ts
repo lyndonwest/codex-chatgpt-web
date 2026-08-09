@@ -555,7 +555,7 @@ export async function callTurnBroker<T>(
         return;
       }
       if (response.id !== id) {
-        finishError(new Error("ChatGPT web turn broker response id mismatch");
+        finishError(new Error("ChatGPT web turn broker response id mismatch"));
         return;
       }
       settled = true;
