@@ -69,9 +69,10 @@ export async function continueChatGptWebAcrossNativeCompaction(
   if (!identity.threadId) {
     return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: false };
   }
+  const threadId = identity.threadId;
 
   const sourceExecutionKey = chatGptCompactionSourceExecutionKey(parsed);
-  const active = chatGptTurnSessions.markNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+  const active = chatGptTurnSessions.markNativeCompactionContinuation(threadId, sourceExecutionKey);
   if (!active) {
     return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: false };
   }
@@ -84,12 +85,12 @@ export async function continueChatGptWebAcrossNativeCompaction(
       // browser has no unresolved tool call, Codex compaction is already a safe semantic boundary:
       // retire the near-full browser now and let the dedicated compaction LLM produce the checkpoint.
       if (outstanding.length === 0) {
-        chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+        chatGptTurnSessions.rollbackNativeCompactionContinuation(threadId, sourceExecutionKey);
         preservedNativeCompactions.delete(active.session);
         chatGptTurnSessions.retire(active.key, active.session);
         console.warn(
           `[chatgpt-web] retired browser at native Codex compaction with no outstanding tools `
-          + `(thread=${identity.threadId})`,
+          + `(thread=${threadId})`,
         );
         return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: false };
       }
@@ -98,12 +99,12 @@ export async function continueChatGptWebAcrossNativeCompaction(
       // for. If it reaches compaction again, stop extending that old model context; the canonical
       // history already carries the tool evidence for the semantic compaction/fresh-browser path.
       if (preservedNativeCompactions.has(active.session)) {
-        chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+        chatGptTurnSessions.rollbackNativeCompactionContinuation(threadId, sourceExecutionKey);
         preservedNativeCompactions.delete(active.session);
         chatGptTurnSessions.retire(active.key, active.session);
         console.warn(
           `[chatgpt-web] retired browser at repeated native Codex compaction `
-          + `(thread=${identity.threadId}, outstanding_tools=${outstanding.length})`,
+          + `(thread=${threadId}, outstanding_tools=${outstanding.length})`,
         );
         return { activeBrowserSession: false, deliveredToolResults: 0, browserCompactionRequired: true };
       }
@@ -126,13 +127,13 @@ export async function continueChatGptWebAcrossNativeCompaction(
       preservedNativeCompactions.add(active.session);
       console.warn(
         `[chatgpt-web] continued live browser execution across native Codex compaction `
-        + `(thread=${identity.threadId}, delivered_results=${results.length})`,
+        + `(thread=${threadId}, delivered_results=${results.length})`,
       );
       return { activeBrowserSession: true, deliveredToolResults: results.length, browserCompactionRequired: false };
     });
   } catch (error) {
     preservedNativeCompactions.delete(active.session);
-    chatGptTurnSessions.rollbackNativeCompactionContinuation(identity.threadId, sourceExecutionKey);
+    chatGptTurnSessions.rollbackNativeCompactionContinuation(threadId, sourceExecutionKey);
     throw error;
   }
 }
