@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
@@ -83,6 +83,11 @@ function opaqueId(prefix: string): string {
   return `${prefix}_${randomBytes(24).toString("base64url")}`;
 }
 
+/** Stable diagnostic correlation without ever writing the bearer token itself to logs. */
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
 function errorOf(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
@@ -152,6 +157,9 @@ export class TurnBroker {
     };
     this.channels.set(token, channel);
     this.pending.set(token, channel);
+    console.info(
+      `[chatgpt-web] broker registered turn (trace=${traceId}, tokenHash=${tokenFingerprint(token)}, tokenChars=${token.length})`,
+    );
     return token;
   }
 
@@ -205,6 +213,9 @@ export class TurnBroker {
   revoke(token: string): void {
     const channel = this.channels.get(token);
     if (!channel) return;
+    console.info(
+      `[chatgpt-web] broker revoked turn (trace=${channel.traceId}, tokenHash=${tokenFingerprint(token)}, tokenChars=${token.length})`,
+    );
     this.channels.delete(token);
     this.pending.delete(token);
     if (channel.bindingId) {
@@ -381,8 +392,8 @@ export class TurnBroker {
       const channel = this.channels.get(token);
       const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
       console.error(
-        `[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
-        + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
+        `[chatgpt-web] broker claim received (tokenHash=${tokenFingerprint(token)}, tokenChars=${token.length}, valid=${Boolean(channel)}`
+        + `${channel ? `, trace=${channel.traceId}` : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
       );
       if (!channel) {
         throw new Error(retiredTurn !== undefined
@@ -544,7 +555,7 @@ export async function callTurnBroker<T>(
         return;
       }
       if (response.id !== id) {
-        finishError(new Error("ChatGPT web turn broker response id mismatch"));
+        finishError(new Error("ChatGPT web turn broker response id mismatch");
         return;
       }
       settled = true;
