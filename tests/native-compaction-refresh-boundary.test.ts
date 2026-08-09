@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { continueChatGptWebAcrossNativeCompaction } from "../src/adapters/chatgpt-web";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
   ChatGptTextFeed,
@@ -7,14 +6,14 @@ import {
   chatGptTurnExecutionKey,
   chatGptTurnSessions,
 } from "../src/adapters/chatgpt-web/turn-execution";
-import type { CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
+import type { CodexParsedRequest, CodexTool } from "../src/types";
 
+const threadId = "thread_native_compaction_refresh_123";
 const tools: CodexTool[] = [
   { name: "write_stdin", description: "Continue command", parameters: { type: "object" } },
 ];
 
 function request(turnId = "turn_test_123"): CodexParsedRequest {
-  const threadId = "thread_native_compaction_refresh_123";
   return {
     modelId: CHATGPT_WEB_MODEL_ID,
     stream: true,
@@ -38,16 +37,6 @@ function request(turnId = "turn_test_123"): CodexParsedRequest {
       ],
     },
   };
-}
-
-function setHistoricalSourceTurn(parsed: CodexParsedRequest, turnId: string): void {
-  const input = (parsed._rawBody as { input: unknown[] }).input;
-  for (const value of input) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const item = value as { type?: string; role?: string; internal_chat_message_metadata_passthrough?: { turn_id?: string } };
-    if (item.type !== "message" || item.role !== "user" || !item.internal_chat_message_metadata_passthrough) continue;
-    item.internal_chat_message_metadata_passthrough.turn_id = turnId;
-  }
 }
 
 function appendToolResult(parsed: CodexParsedRequest, callId: string): void {
@@ -86,16 +75,7 @@ function appendToolResult(parsed: CodexParsedRequest, callId: string): void {
   );
 }
 
-test("the first post-compaction tool result retires the preserved browser alias and starts fresh", async () => {
-  const provider: CodexProviderConfig = {
-    adapter: "chatgpt-web",
-    baseUrl: "browser://native-compaction-refresh-boundary-test",
-    chatgptWeb: {
-      localToolsEnabled: true,
-      solAvailable: true,
-      proAvailable: true,
-    },
-  };
+test("the first post-compaction tool result retires the preserved browser alias and starts fresh", () => {
   const firstRequest = request();
   const firstExecutionKey = chatGptTurnExecutionKey(firstRequest);
   let cancelled = false;
@@ -110,14 +90,9 @@ test("the first post-compaction tool result retires the preserved browser alias 
   }));
 
   try {
-    const compaction = request("turn_compaction_456");
-    compaction._compactionRequest = true;
-    setHistoricalSourceTurn(compaction, "turn_test_123");
-    expect(await continueChatGptWebAcrossNativeCompaction(compaction, provider)).toEqual({
-      activeBrowserSession: true,
-      deliveredToolResults: 0,
-      browserCompactionRequired: false,
-    });
+    // This test owns the post-compaction alias mechanics. Establish the same pending alias that the
+    // preservation path creates after it has rescued a real in-flight native-tool handoff.
+    expect(chatGptTurnSessions.markNativeCompactionContinuation(threadId, firstExecutionKey)?.session).toBe(preserved);
 
     const postCompactionTurnId = "turn_after_compaction_789";
     const postCompactionRound = request(postCompactionTurnId);
