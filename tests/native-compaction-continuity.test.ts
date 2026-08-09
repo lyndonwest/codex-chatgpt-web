@@ -202,10 +202,10 @@ test("native Codex compaction delivers completed tool results and rebinds the sa
   }
 });
 
-test("a second native compaction on the same live browser execution escalates to browser compaction", async () => {
+test("native Codex compaction retires a live browser when no tool handoff is outstanding", async () => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
-    baseUrl: "browser://native-compaction-second-boundary-test",
+    baseUrl: "browser://native-compaction-safe-boundary-test",
     chatgptWeb: {
       localToolsEnabled: true,
       solAvailable: true,
@@ -214,35 +214,31 @@ test("a second native compaction on the same live browser execution escalates to
   };
   const firstRequest = request();
   const firstExecutionKey = chatGptTurnExecutionKey(firstRequest);
+  let cancelled = false;
   chatGptTurnSessions.getOrCreate(firstExecutionKey, () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
-    cancel: () => {},
+    cancel: () => {
+      cancelled = true;
+    },
   }));
 
   try {
-    const firstCompaction = request("turn_compaction_first");
-    firstCompaction._compactionRequest = true;
-    setHistoricalSourceTurn(firstCompaction, "turn_test_123");
-    expect(await continueChatGptWebAcrossNativeCompaction(firstCompaction, provider)).toEqual({
-      activeBrowserSession: true,
+    const compaction = request("turn_compaction_no_tools");
+    compaction._compactionRequest = true;
+    setHistoricalSourceTurn(compaction, "turn_test_123");
+    expect(await continueChatGptWebAcrossNativeCompaction(compaction, provider)).toEqual({
+      activeBrowserSession: false,
       deliveredToolResults: 0,
       browserCompactionRequired: false,
     });
+    expect(cancelled).toBeTrue();
 
-    // Consume the one-shot alias exactly as the immediate post-compaction provider round does.
-    expect(chatGptTurnExecutionKey(request("turn_after_first_compaction"))).toBe(firstExecutionKey);
-
-    const secondCompaction = request("turn_compaction_second");
-    secondCompaction._compactionRequest = true;
-    setHistoricalSourceTurn(secondCompaction, "turn_test_123");
-    expect(await continueChatGptWebAcrossNativeCompaction(secondCompaction, provider)).toEqual({
-      activeBrowserSession: true,
-      deliveredToolResults: 0,
-      browserCompactionRequired: true,
-    });
+    // With no fragile tool handoff, the compacted provider round must start from its fresh
+    // execution key rather than aliasing back to the retired pre-compaction browser.
+    expect(chatGptTurnExecutionKey(request("turn_after_compaction_fresh"))).not.toBe(firstExecutionKey);
   } finally {
     chatGptTurnSessions.clear();
   }
