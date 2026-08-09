@@ -21,7 +21,6 @@ import {
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
-  buildNativeOnlyCompactionSummary,
   COMPACT_PROMPT,
   decodeCompactionSummary,
   extractCompactUserMessages,
@@ -271,66 +270,16 @@ export async function responseRequest(
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
 
-    if (!continuation.browserCompactionRequired) {
-      const rawBody = parsed._rawBody && typeof parsed._rawBody === "object" && !Array.isArray(parsed._rawBody)
-        ? parsed._rawBody as { input?: unknown }
-        : {};
-      const summary = buildNativeOnlyCompactionSummary(rawBody.input);
-      const events: AdapterEvent[] = [
-        { type: "text_delta", text: summary, phase: "final_answer" },
-        {
-          type: "done",
-          stopReason: "stop",
-          endTurn: true,
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: true },
-        },
-      ];
-      const responseModel = route.slug;
-      console.warn(
-        `[chatgpt-web] handled native Codex compaction without browser turn `
-        + `(active_browser=${continuation.activeBrowserSession}, delivered_results=${continuation.deliveredToolResults}, summary_chars=${summary.length})`,
-      );
-
-      if (parsed.stream) {
-        const queue = new AsyncEventQueue<AdapterEvent>();
-        for (const event of events) queue.push(event);
-        queue.close();
-        const stream = bridgeToResponsesSSE(
-          queue,
-          responseModel,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          2_000,
-          { hideThinkingSummary: parsed.options.hideThinkingSummary, compaction: true },
-        );
-        return new Response(stream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-          },
-        });
-      }
-
-      return Response.json(buildResponseJSON(events, responseModel, {
-        hideThinkingSummary: parsed.options.hideThinkingSummary,
-        compaction: true,
-      }));
-    }
-
-    // This live browser execution already survived one native compaction. Restore upstream's
-    // dedicated Web summarization turn now so the old ChatGPT response is retired and the next
-    // Codex round starts with a fresh browser/model context instead of exhausting the live one.
+    // Preserve any fragile in-flight native-tool handoff first, then always use the normal
+    // dedicated ChatGPT Web summarization turn for the canonical Codex checkpoint. The compaction
+    // turn has its own execution key, so it cannot replace or consume the preserved browser state.
     delete parsed.context.tools;
     delete parsed.options.toolChoice;
     delete parsed.options.parallelToolCalls;
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
     console.warn(
-      `[chatgpt-web] running browser compaction after one preserved live native compaction `
-      + `(active_browser=${continuation.activeBrowserSession})`,
+      `[chatgpt-web] running semantic browser compaction after native Codex compaction `
+      + `(active_browser=${continuation.activeBrowserSession}, delivered_results=${continuation.deliveredToolResults}, repeated_boundary=${continuation.browserCompactionRequired})`,
     );
   }
 
