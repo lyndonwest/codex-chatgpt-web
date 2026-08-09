@@ -8,7 +8,12 @@ import {
   createChatGptWebAdapter,
 } from "../src/adapters/chatgpt-web";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import {
+  ChatGptTextFeed,
+  ChatGptTraceFeed,
+  chatGptTurnExecutionKey,
+  chatGptTurnSessions,
+} from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
@@ -172,7 +177,11 @@ test("native Codex compaction delivers completed tool results and rebinds the sa
     appendToolResult(compactRequest, callStart!.id);
 
     const continued = await continueChatGptWebAcrossNativeCompaction(compactRequest, provider);
-    expect(continued).toEqual({ activeBrowserSession: true, deliveredToolResults: 1 });
+    expect(continued).toEqual({
+      activeBrowserSession: true,
+      deliveredToolResults: 1,
+      browserCompactionRequired: false,
+    });
     expect(browserStarts).toBe(1);
 
     const postCompactRequest = request("turn_after_compaction_789");
@@ -190,5 +199,51 @@ test("native Codex compaction delivers completed tool results and rebinds the sa
     chatGptTurnSessions.clear();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     await TurnBroker.forSocket(socketPath).close();
+  }
+});
+
+test("a second native compaction on the same live browser execution escalates to browser compaction", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "browser://native-compaction-second-boundary-test",
+    chatgptWeb: {
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+    },
+  };
+  const firstRequest = request();
+  const firstExecutionKey = chatGptTurnExecutionKey(firstRequest);
+  chatGptTurnSessions.getOrCreate(firstExecutionKey, () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => {},
+  }));
+
+  try {
+    const firstCompaction = request("turn_compaction_first");
+    firstCompaction._compactionRequest = true;
+    setHistoricalSourceTurn(firstCompaction, "turn_test_123");
+    expect(await continueChatGptWebAcrossNativeCompaction(firstCompaction, provider)).toEqual({
+      activeBrowserSession: true,
+      deliveredToolResults: 0,
+      browserCompactionRequired: false,
+    });
+
+    // Consume the one-shot alias exactly as the immediate post-compaction provider round does.
+    expect(chatGptTurnExecutionKey(request("turn_after_first_compaction"))).toBe(firstExecutionKey);
+
+    const secondCompaction = request("turn_compaction_second");
+    secondCompaction._compactionRequest = true;
+    setHistoricalSourceTurn(secondCompaction, "turn_test_123");
+    expect(await continueChatGptWebAcrossNativeCompaction(secondCompaction, provider)).toEqual({
+      activeBrowserSession: true,
+      deliveredToolResults: 0,
+      browserCompactionRequired: true,
+    });
+  } finally {
+    chatGptTurnSessions.clear();
   }
 });
