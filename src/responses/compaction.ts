@@ -194,3 +194,80 @@ export function buildCompactV1Output(
   const summaryText = summary.trim().length > 0 ? `${SUMMARY_PREFIX}\n${summary}` : "(no summary available)";
   return [...selected, compactUserMessageItem(summaryText)];
 }
+
+const NATIVE_ONLY_RECOVERY_MAX_CHARS = 16_000;
+const NATIVE_ONLY_RECOVERY_ITEM_MAX_CHARS = 3_000;
+
+function compactRecoveryValue(value: unknown, maxChars = NATIVE_ONLY_RECOVERY_ITEM_MAX_CHARS): string {
+  let text: string;
+  if (typeof value === "string") text = value;
+  else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, "[image attachment]");
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
+}
+
+function recoveryItemText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  const type = typeof item.type === "string" ? item.type : "message";
+
+  if (type === "compaction_trigger") return undefined;
+  if (type === "compaction" && typeof item.encrypted_content === "string") {
+    const decoded = decodeCompactionSummary(item.encrypted_content);
+    return decoded ? `Previous compact checkpoint:\n${compactRecoveryValue(decoded)}` : undefined;
+  }
+  if (type === "message") {
+    if (item.role !== "assistant") return undefined;
+    return `Recent assistant state:\n${compactRecoveryValue(item.content)}`;
+  }
+  if (type === "agent_message") {
+    return `Recent agent state:\n${compactRecoveryValue(item.content ?? item)}`;
+  }
+  if (
+    type === "function_call"
+    || type === "function_call_output"
+    || type === "custom_tool_call"
+    || type === "custom_tool_call_output"
+    || type === "tool_search_call"
+    || type === "tool_search_output"
+    || type === "local_shell_call"
+  ) {
+    return `Recent native tool state (${type}):\n${compactRecoveryValue(item)}`;
+  }
+  return undefined;
+}
+
+/**
+ * Build a bounded Codex recovery checkpoint without asking ChatGPT to summarize. The live browser
+ * execution remains authoritative while it survives; this text exists so native Codex history is
+ * still useful after a browser/runtime restart.
+ */
+export function buildNativeOnlyCompactionSummary(input: unknown): string {
+  const header = [
+    "Codex-only context checkpoint for a live ChatGPT Web execution.",
+    "The active ChatGPT browser turn continues independently and remains authoritative for in-flight model state.",
+    "This native checkpoint exists for Codex bookkeeping and fresh-turn recovery; do not repeat completed work merely because Codex compacted its local history.",
+  ].join(" ");
+
+  if (!Array.isArray(input)) return `${header}\n\nNo additional native recovery tail was available.`;
+
+  const newestFirst: string[] = [];
+  let remaining = NATIVE_ONLY_RECOVERY_MAX_CHARS;
+  for (let index = input.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const text = recoveryItemText(input[index]);
+    if (!text) continue;
+    const bounded = text.length <= remaining ? text : `${text.slice(0, Math.max(0, remaining - 1))}…`;
+    if (!bounded) break;
+    newestFirst.push(bounded);
+    remaining -= bounded.length;
+  }
+
+  if (newestFirst.length === 0) return `${header}\n\nNo additional native recovery tail was available.`;
+  return `${header}\n\nRecent native recovery tail:\n\n${newestFirst.reverse().join("\n\n")}`;
+}

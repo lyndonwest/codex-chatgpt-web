@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { atomicWriteFile } from "../../config";
-import type { CodexParsedRequest } from "../../types";
+import { namespacedToolName, type CodexParsedRequest, type CodexTool } from "../../types";
 import {
   extractChatGptTurnEnvironment,
   extractChatGptTurnIdentity,
@@ -15,6 +15,7 @@ interface StoredThreadEnvironment {
   roots: string[];
   writableRoots: string[];
   sandboxPolicy: ChatGptSandboxPolicy;
+  tools?: CodexTool[];
   updatedAt: number;
 }
 
@@ -77,6 +78,58 @@ function sandboxPolicy(value: unknown, roots: string[], writableRoots: string[])
   throw new Error("Invalid persisted ChatGPT sandbox policy");
 }
 
+function storedTool(value: unknown): CodexTool {
+  const parsed = record(value);
+  const parameters = record(parsed?.parameters);
+  if (!parsed || typeof parsed.name !== "string" || typeof parsed.description !== "string" || !parameters) {
+    throw new Error("Invalid persisted ChatGPT thread tool");
+  }
+  const tool: CodexTool = { name: parsed.name, description: parsed.description, parameters };
+  for (const field of ["strict", "freeform", "toolSearch", "loadedFromToolSearch", "webSearch"] as const) {
+    if (parsed[field] !== undefined) {
+      if (typeof parsed[field] !== "boolean") throw new Error(`Invalid persisted ChatGPT tool ${field}`);
+      tool[field] = parsed[field] as boolean;
+    }
+  }
+  if (parsed.namespace !== undefined) {
+    if (typeof parsed.namespace !== "string") throw new Error("Invalid persisted ChatGPT tool namespace");
+    tool.namespace = parsed.namespace;
+  }
+  return tool;
+}
+
+function storedTools(value: unknown): CodexTool[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("Invalid persisted ChatGPT thread tools");
+  return value.map(storedTool);
+}
+
+function mergeTools(previous: readonly CodexTool[], current: readonly CodexTool[]): CodexTool[] {
+  const merged = new Map<string, CodexTool>();
+  for (const tool of previous) merged.set(namespacedToolName(tool.namespace, tool.name), structuredClone(tool));
+  for (const tool of current) merged.set(namespacedToolName(tool.namespace, tool.name), structuredClone(tool));
+  return [...merged.values()];
+}
+
+function rawRequestDeclaresTools(parsed: CodexParsedRequest): boolean {
+  const body = record(parsed._rawBody);
+  if (!body) return false;
+  if (Object.prototype.hasOwnProperty.call(body, "tools")) return true;
+  const input = Array.isArray(body.input) ? body.input : [];
+  return input.some(item => record(item)?.type === "additional_tools");
+}
+
+function currentToolsAreAuthoritative(parsed: CodexParsedRequest): boolean {
+  if (rawRequestDeclaresTools(parsed)) return true;
+  return (parsed.context.tools ?? []).some(tool => tool.loadedFromToolSearch !== true);
+}
+
+function resolveTools(parsed: CodexParsedRequest, stored?: StoredThreadEnvironment): CodexTool[] {
+  const current = parsed.context.tools ?? [];
+  if (currentToolsAreAuthoritative(parsed) || !stored) return structuredClone(current);
+  return mergeTools(stored.tools ?? [], current);
+}
+
 function validateStoredEnvironment(value: unknown): StoredThreadEnvironment {
   const parsed = record(value);
   if (!parsed || typeof parsed.cwd !== "string" || !isAbsolute(parsed.cwd) || typeof parsed.updatedAt !== "number") {
@@ -93,6 +146,7 @@ function validateStoredEnvironment(value: unknown): StoredThreadEnvironment {
     roots,
     writableRoots,
     sandboxPolicy: sandboxPolicy(parsed.sandboxPolicy, roots, writableRoots),
+    tools: storedTools(parsed.tools),
     updatedAt: parsed.updatedAt,
   };
 }
@@ -103,14 +157,17 @@ function authority(environment: ChatGptTurnEnvironment, updatedAt: number): Stor
     roots: environment.roots,
     writableRoots: environment.writableRoots,
     sandboxPolicy: environment.sandboxPolicy,
+    tools: structuredClone(environment.tools),
     updatedAt,
   };
 }
 
 /**
- * Codex emits its trusted environment envelope when a task starts or its environment changes,
- * not on every follow-up. This store carries only that trusted authority across turns. Tool
- * declarations are always taken from the current request and are never persisted.
+ * Codex emits its trusted environment envelope and full native tool registry when a task starts or
+ * those capabilities change, but follow-up/resume requests can omit either. Persist the last
+ * authoritative per-thread values and merge only deferred tool_search additions when a later
+ * request omits the base registry. An explicitly supplied registry (including an empty one)
+ * replaces the stored tools instead of accumulating stale capabilities.
  */
 export class ChatGptThreadEnvironmentStore {
   private loaded = false;
@@ -123,21 +180,24 @@ export class ChatGptThreadEnvironmentStore {
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
     const identity = extractChatGptTurnIdentity(parsed);
+    const stored = identity.threadId ? this.get(identity.threadId) : undefined;
     try {
       const environment = extractChatGptTurnEnvironment(parsed);
-      if (identity.threadId) this.set(identity.threadId, environment);
-      return environment;
+      const resolved = { ...environment, tools: resolveTools(parsed, stored) };
+      if (identity.threadId) this.set(identity.threadId, resolved);
+      return resolved;
     } catch (error) {
       if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
-      const stored = this.get(identity.threadId);
       if (!stored) throw error;
-      return {
+      const resolved: ChatGptTurnEnvironment = {
         cwd: stored.cwd,
         roots: stored.roots,
         writableRoots: stored.writableRoots,
         sandboxPolicy: stored.sandboxPolicy,
-        tools: parsed.context.tools ?? [],
+        tools: resolveTools(parsed, stored),
       };
+      this.set(identity.threadId, resolved);
+      return resolved;
     }
   }
 
