@@ -1,4 +1,4 @@
-import { createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { continueChatGptWebAcrossNativeCompaction, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
@@ -262,13 +262,25 @@ export async function responseRequest(
     );
   }
   if (compaction) {
-    // History compaction is a dedicated summarization turn. It must never bind the active Codex
-    // tool bridge or continue an in-flight MCP round; the returned summary becomes the next turn's
-    // replacement history through the Responses compaction contract.
+    const provider = providerConfig(config);
+    let continuation;
+    try {
+      continuation = await continueChatGptWebAcrossNativeCompaction(parsed, provider);
+    } catch (error) {
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    }
+
+    // Preserve any fragile in-flight native-tool handoff first, then always use the normal
+    // dedicated ChatGPT Web summarization turn for the canonical Codex checkpoint. The compaction
+    // turn has its own execution key, so it cannot replace or consume the preserved browser state.
     delete parsed.context.tools;
     delete parsed.options.toolChoice;
     delete parsed.options.parallelToolCalls;
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
+    console.warn(
+      `[chatgpt-web] running semantic browser compaction after native Codex compaction `
+      + `(active_browser=${continuation.activeBrowserSession}, delivered_results=${continuation.deliveredToolResults}, repeated_boundary=${continuation.browserCompactionRequired})`,
+    );
   }
 
   const adapter = adapterFactory(providerConfig(config));
