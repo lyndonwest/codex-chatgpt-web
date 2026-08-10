@@ -548,7 +548,7 @@ test("effort selection uses structural menu and slider indices instead of locali
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
-  expect(workerSource).toContain('timeout: 70_000');
+  expect(workerSource).toContain('timeout: CHATGPT_EFFORT_READY_TIMEOUT_MS');
   expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
   expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
   expect(sessionSource).toContain('[role="menuitemradio"]');

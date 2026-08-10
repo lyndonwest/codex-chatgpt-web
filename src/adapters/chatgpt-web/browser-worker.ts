@@ -84,6 +84,8 @@ export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+export const CHATGPT_STALLED_PROGRESS_TIMEOUT_MS = 5 * 60_000;
+export const CHATGPT_EFFORT_READY_TIMEOUT_MS = 30_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -237,7 +239,7 @@ export function assertChatGptWebInputWithinLimits(
 const browserStageTimeouts = {
   browserPage: 60_000,
   temporaryChatPreparation: 150_000,
-  effortSelection: 120_000,
+  effortSelection: 45_000,
   promptAttachment: 60_000,
   fileAttachment: 120_000,
   send: 20_000,
@@ -328,6 +330,38 @@ export class ChatGptCompletionTracker {
       return false;
     }
     return now - this.candidate.since >= this.stableMs;
+  }
+}
+
+export interface ChatGptTurnProgressState {
+  responsePresent: boolean;
+  currentText: string;
+  traceBlocks: ReadonlyArray<{ kind: string; text: string }>;
+}
+
+/**
+ * Fails only after ChatGPT stops making observable semantic progress. Long turns remain valid as
+ * long as answer text or visible reasoning/tool status changes. Animated DOM churn is intentionally
+ * excluded so a frozen "Thinking" surface cannot keep a turn alive forever.
+ */
+export class ChatGptTurnProgressTracker {
+  private signature?: string;
+  private lastProgressAt?: number;
+
+  constructor(private readonly stalledMs = CHATGPT_STALLED_PROGRESS_TIMEOUT_MS) {}
+
+  update(state: ChatGptTurnProgressState, now = Date.now()): boolean {
+    const signature = JSON.stringify([
+      state.responsePresent,
+      state.currentText,
+      state.traceBlocks.map(block => [block.kind, block.text]),
+    ]);
+    if (signature !== this.signature || this.lastProgressAt === undefined) {
+      this.signature = signature;
+      this.lastProgressAt = now;
+      return false;
+    }
+    return now - this.lastProgressAt >= this.stalledMs;
   }
 }
 
@@ -503,7 +537,10 @@ export function browserDiagnosticIncludesScreenshot(
   checkpoint: string,
   captureAll = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1",
 ): boolean {
-  return captureAll || checkpoint === "response-stalled-30s" || checkpoint === "turn-failed";
+  return captureAll
+    || checkpoint === "response-stalled-30s"
+    || checkpoint === "response-stalled-progress"
+    || checkpoint === "turn-failed";
 }
 
 function privateDirectory(path: string): void {
@@ -907,7 +944,7 @@ export class ChatGptBrowserWorker {
     }
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
     try {
-      await currentEffort.waitFor({ state: "visible", timeout: 70_000 });
+      await currentEffort.waitFor({ state: "visible", timeout: CHATGPT_EFFORT_READY_TIMEOUT_MS });
     } catch {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
@@ -929,9 +966,9 @@ export class ChatGptBrowserWorker {
     let ready: "effort" | "slider" | "rate-limit";
     try {
       ready = await Promise.race([
-        effortChoice.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "effort" as const),
-        effortSlider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "slider" as const),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
+        effortChoice.waitFor({ state: "visible", timeout: CHATGPT_EFFORT_READY_TIMEOUT_MS, signal: waitAbort.signal }).then(() => "effort" as const),
+        effortSlider.waitFor({ state: "visible", timeout: CHATGPT_EFFORT_READY_TIMEOUT_MS, signal: waitAbort.signal }).then(() => "slider" as const),
+        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: CHATGPT_EFFORT_READY_TIMEOUT_MS, signal: waitAbort.signal }).then(() => "rate-limit" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       await captureDiagnostic?.(ready === "slider" ? "effort-slider-visible" : "effort-choice-visible");
@@ -1818,6 +1855,7 @@ export class ChatGptBrowserWorker {
       };
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const progressTracker = new ChatGptTurnProgressTracker();
       for (;;) {
         if (page.isClosed()) {
           throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
@@ -1919,6 +1957,24 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
           });
           if (domError) throw new Error(domError);
+        }
+        if (progressTracker.update({
+          responsePresent: snapshot.responsePresent,
+          currentText: snapshot.visibleText,
+          traceBlocks: snapshot.traceBlocks,
+        })) {
+          await diagnostics.capture(page, "response-stalled-progress");
+          const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn).catch(error => JSON.stringify({
+            diagnosticError: error instanceof Error ? error.message : String(error),
+          }));
+          console.warn(
+            `[chatgpt-web] response stalled without observable progress for ${CHATGPT_STALLED_PROGRESS_TIMEOUT_MS}ms`
+            + ` trace=${turn.traceId} ui=${diagnostic}`,
+          );
+          throw new ChatGptWebAdapterError(
+            `ChatGPT response made no observable progress for ${CHATGPT_STALLED_PROGRESS_TIMEOUT_MS / 1000} seconds`,
+            { status: 504, errorType: "server_error", code: "chatgpt_response_stalled", retryable: true },
+          );
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
       }
