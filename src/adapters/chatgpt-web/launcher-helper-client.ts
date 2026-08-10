@@ -186,6 +186,7 @@ export class LauncherBrowserHelperClient {
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
+            ...(turn.useGitHubApp ? { useGitHubApp: true } : {}),
             prepared: { text: prepared.text, images: prepared.images } satisfies CompiledChatGptWebPrompt,
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
           },
