@@ -27,7 +27,6 @@ const expected = [
   ["scripts/generate-third-party-notices.ts", `Bun ${bunVersion}`],
   ["scripts/prepare-windows-baseline-bun.ps1", `bun-v$Version`],
   [".github/workflows/ci.yml", `bun-version: ${bunVersion}`],
-  [".github/workflows/ci.yml", `-Version ${bunVersion}`],
   [".github/workflows/release.yml", `Bun-${bunVersion}.md`],
   [".github/workflows/release.yml", `-Version ${bunVersion}`],
 ] as const;
