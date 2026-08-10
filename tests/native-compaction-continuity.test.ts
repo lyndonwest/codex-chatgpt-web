@@ -45,7 +45,7 @@ function request(turnId = "turn_test_123"): CodexParsedRequest {
     stream: true,
     context: {
       tools,
-      messages: [{ role: "user", content: "Continue the running command", timestamp: 1 }],
+      messages: [{ role: "user", content: "native2_allowed: true\nContinue the running command", timestamp: 1 }],
     },
     options: { reasoning: "high" },
     _rawBody: {

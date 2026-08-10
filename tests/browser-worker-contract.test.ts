@@ -150,19 +150,21 @@ test("closing the launcher page is an immediate terminal turn error", async () =
   );
 });
 
-test("connector verification and real tool turns share one Playwright selector", () => {
+test("GitHub and Native2 turns share one exact Playwright app selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBe(4);
   expect(workerSource).toContain('"temporary_chat_preparation"');
   expect(workerSource).toContain('if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL)');
-  expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
+  expect(workerSource).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+  expect(workerSource).toContain('const mentionTrigger = `@${connectorName.slice(0, 1).toLowerCase()}`');
+  expect(workerSource).toContain('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])');
+  expect(workerSource).toContain('...(localTools ? [this.config.appName] : [])');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain("await appResult.click({ force: true, timeout: 10_000 })");
   expect(workerSource).not.toContain("highlightConnectorMenuRow");
   expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('appResult.press("Enter")');
-  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
+  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer, connectorName)");
   expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
 });
@@ -322,8 +324,6 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   expect(resolved).toBe(selectedComposer);
   expect(activeComposerCalls).toBe(3);
   expect(calls).toEqual([
-    ["fill", ""],
-    ["fill", ""],
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
@@ -374,6 +374,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: {
+      press: async (value: string) => { calls.push(`key:${value}`); },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -391,9 +394,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   }, page);
 
   expect(calls).toEqual([
-    "clear",
-    "clear", "focus", "type", "menu:1",
-    "clear", "focus", "type", "menu:2",
+    "focus", "type", "menu:1",
+    "key:Escape", "key:Backspace", "key:Backspace",
+    "focus", "type", "menu:2",
     "activate", "selected",
   ]);
 });
@@ -461,7 +464,6 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   }, page, "context", true);
 
   expect(calls).toEqual([
-    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["type", "@c"],
