@@ -21,6 +21,7 @@ interface RunMessage {
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
+    useGitHubApp?: boolean;
     prepared: CompiledChatGptWebPrompt;
     captureLunaCheckpoint?: boolean;
   };
@@ -108,6 +109,9 @@ async function run(message: RunMessage): Promise<void> {
   if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {
     throw new Error("Browser helper prompt is invalid");
   }
+  if (message.turn.useGitHubApp !== undefined && typeof message.turn.useGitHubApp !== "boolean") {
+    throw new Error("Browser helper GitHub-app flag is invalid");
+  }
   if (message.turn.captureLunaCheckpoint !== undefined && typeof message.turn.captureLunaCheckpoint !== "boolean") {
     throw new Error("Browser helper Luna checkpoint flag is invalid");
   }
@@ -129,6 +133,7 @@ async function run(message: RunMessage): Promise<void> {
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,
+    ...(message.turn.useGitHubApp ? { useGitHubApp: true } : {}),
     prepare: async () => ({ ...message.turn.prepared, release: () => {} }),
     abortSignal: abortController.signal,
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
