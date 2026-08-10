@@ -11,8 +11,12 @@ describe("GitHub-first Web app routing contract", () => {
     expect(adapter).toContain("chatGptNative2Allowed(parsed)");
     expect(adapter).toContain("useGitHubApp: !parsed._compactionRequest");
     expect(worker).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
-    expect(worker).toContain("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])");
     expect(worker).toContain("...(localTools ? [this.config.appName] : [])");
+    expect(worker).toContain("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])");
+    const native2First = worker.indexOf("...(localTools ? [this.config.appName] : [])");
+    const githubSecond = worker.indexOf("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])", native2First);
+    expect(native2First).toBeGreaterThan(-1);
+    expect(githubSecond).toBeGreaterThan(native2First);
   });
 
   test("launcher helper preserves the GitHub-app flag", () => {

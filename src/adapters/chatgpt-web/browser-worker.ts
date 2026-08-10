@@ -1341,8 +1341,8 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<void> {
     const connectorNames = [
-      ...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : []),
       ...(localTools ? [this.config.appName] : []),
+      ...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : []),
     ];
     if (connectorNames.length === 0) {
       const composer = await this.activeComposer(page);
