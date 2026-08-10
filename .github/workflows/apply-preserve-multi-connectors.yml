@@ -1,0 +1,80 @@
+name: Apply multi-connector preservation fix
+
+on:
+  push:
+    branches: [lyndon/preserve-multi-connectors]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Preserve selected connectors during full-name fallback
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          worker = Path("src/adapters/chatgpt-web/browser-worker.ts")
+          text = worker.read_text()
+          old = r'''    let highlighted = await appResult.getAttribute("data-highlighted");
+              if (highlighted === null) {
+                await composer.fill("");
+                await composer.focus();
+                await composer.pressSequentially(`@${connectorName.replace(/\s+/g, "")}`, { delay: 25 });
+                await appResult.waitFor({ state: "visible", timeout: 2_500 });
+                highlighted = await appResult.getAttribute("data-highlighted");
+              }
+          '''
+          new = r'''    let highlighted = await appResult.getAttribute("data-highlighted");
+              if (highlighted === null) {
+                // Remove only the temporary mention text. Clearing the composer here would also
+                // remove connector pills selected earlier in a multi-connector turn (for example,
+                // GitHub before Codex Native2).
+                await page.keyboard.press("Escape").catch(() => {});
+                await composer.focus();
+                for (let index = 0; index < mentionTrigger.length; index += 1) {
+                  await composer.press("Backspace");
+                }
+                await composer.pressSequentially(`@${connectorName.replace(/\s+/g, "")}`, { delay: 25 });
+                await appResult.waitFor({ state: "visible", timeout: 2_500 });
+                highlighted = await appResult.getAttribute("data-highlighted");
+              }
+          '''
+          if old not in text:
+              raise SystemExit("browser-worker keyboard fallback block not found")
+          worker.write_text(text.replace(old, new, 1))
+
+          test = Path("tests/browser-worker-contract.test.ts")
+          text = test.read_text()
+          anchor = r'''  expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+            expect(workerSource).toContain('await composer.press("Enter")');
+          '''
+          replacement = r'''  expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+            expect(workerSource).toContain('await page.keyboard.press("Escape").catch(() => {})');
+            expect(workerSource).toContain("index < mentionTrigger.length");
+            expect(workerSource).toContain('await composer.press("Backspace")');
+            const fullNameFallbackStart = workerSource.indexOf('let highlighted = await appResult.getAttribute("data-highlighted")');
+            const fullNameFallbackEnd = workerSource.indexOf('await composer.press("Enter")', fullNameFallbackStart);
+            expect(fullNameFallbackStart).toBeGreaterThan(-1);
+            expect(fullNameFallbackEnd).toBeGreaterThan(fullNameFallbackStart);
+            expect(workerSource.slice(fullNameFallbackStart, fullNameFallbackEnd)).not.toContain('composer.fill("")');
+            expect(workerSource).toContain('await composer.press("Enter")');
+          '''
+          if anchor not in text:
+              raise SystemExit("browser-worker contract-test anchor not found")
+          test.write_text(text.replace(anchor, replacement, 1))
+          PY
+      - name: Commit fix
+        run: |
+          rm .github/workflows/apply-preserve-multi-connectors.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Preserve selected connectors during keyboard fallback"
+          git push
