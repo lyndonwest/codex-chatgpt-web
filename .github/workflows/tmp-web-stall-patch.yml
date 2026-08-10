@@ -25,6 +25,9 @@ jobs:
           python3 .github/scripts/tmp_update_effort_contract.py
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        run: bun install --frozen-lockfile
+        working-directory: launcher
       - name: Focused tests
         run: bun test tests/chatgpt-web-stall-detection.test.ts tests/browser-worker-contract.test.ts
       - name: Full verification
