@@ -151,6 +151,35 @@ test("closing the launcher page is an immediate terminal turn error", async () =
   );
 });
 
+test("GitHub and Native2 turns preserve upstream catalog refresh and keyboard connector selection", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("private async selectConnector(");
+  expect(workerSource).toContain("await this.selectConnector(page, undefined, true)");
+  expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBeGreaterThanOrEqual(4);
+  expect(workerSource).toContain('"connector_catalog_refresh"');
+  expect(workerSource).toContain('"connector-catalog-refreshed"');
+  expect(workerSource).toContain('"temporary_chat_preparation"');
+  expect(workerSource).toContain('if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL)');
+  expect(workerSource).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+  expect(workerSource).toContain('const mentionTrigger = `@${connectorName.slice(0, 1).toLowerCase()}`');
+  expect(workerSource).toContain('...(localTools ? [this.config.appName] : [])');
+  expect(workerSource).toContain('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])');
+  expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
+  expect(workerSource).toContain('await appResult.getAttribute("data-highlighted")');
+  expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+  expect(workerSource).toContain('await composer.press("Enter")');
+  expect(workerSource).not.toContain("highlightConnectorMenuRow");
+  expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
+  expect(workerSource).toContain('typeof appResult.getAttribute !== "function"');
+  expect(workerSource).toContain('await appResult.click({ force: true, timeout: 10_000 })');
+  const connectors = workerSource.indexOf('const connectorNames = [');
+  const native2 = workerSource.indexOf('...(localTools ? [this.config.appName] : [])', connectors);
+  const github = workerSource.indexOf('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])', native2);
+  expect(connectors).toBeGreaterThan(-1);
+  expect(native2).toBeGreaterThan(connectors);
+  expect(github).toBeGreaterThan(native2);
+});
+
 test("active composer resolution waits for exactly one visible editor", async () => {
   const composer = { id: "active" };
   const counts = [2, 1];
@@ -499,8 +528,6 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   expect(resolved).toBe(selectedComposer);
   expect(activeComposerCalls).toBe(3);
   expect(calls).toEqual([
-    ["fill", ""],
-    ["fill", ""],
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
@@ -569,8 +596,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   }, page);
 
   expect(calls).toEqual([
-    "clear",
-    "clear", "focus", "type", "menu:1",
+    "focus", "type", "menu:1",
     "clear", "focus", "type", "menu:2",
     "activate", "selected",
   ]);
@@ -773,7 +799,6 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   }, page, "context", true);
 
   expect(calls).toEqual([
-    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["type", "@c"],
