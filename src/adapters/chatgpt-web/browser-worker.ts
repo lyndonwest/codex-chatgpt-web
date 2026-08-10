@@ -1215,7 +1215,7 @@ export class ChatGptBrowserWorker {
   private async connectorMentionFailure(
     menuRows: Locator,
     triggerAttempts: number,
-    connectorName: string,
+    connectorName = this.config.appName,
   ): Promise<string> {
     const titles = await this.connectorMentionRowTitles(menuRows);
     if (titles.length === 0) {
@@ -1233,12 +1233,12 @@ export class ChatGptBrowserWorker {
 
   private async selectConnector(
     page: Page,
-    connectorName: string,
+    connectorName = this.config.appName,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
     if (await this.connectorIsSelected(composer, connectorName)) {
-      await captureDiagnostic?.(`connector-already-selected-${connectorName}`);
+      await captureDiagnostic?.("connector-already-selected");
       return composer;
     }
 
@@ -1254,24 +1254,23 @@ export class ChatGptBrowserWorker {
       triggerAttempts += 1;
       composer = await this.activeComposer(page);
       await composer.focus();
-      await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
       await settleChatGptUi();
       await composer.pressSequentially(mentionTrigger, { delay: 25 });
       if (!firstMenuCaptured) {
         firstMenuCaptured = true;
-        await captureDiagnostic?.(`connector-mention-triggered-${connectorName}`);
+        await captureDiagnostic?.("connector-mention-triggered");
       }
       try {
         await appResult.waitFor({
           state: "visible",
           timeout: Math.min(2_500, Math.max(1, menuDeadline - Date.now())),
         });
-        await captureDiagnostic?.(`connector-menu-visible-${connectorName}`);
+        await captureDiagnostic?.("connector-menu-visible");
         break;
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         if (Date.now() >= menuDeadline) {
-          await captureDiagnostic?.(`connector-menu-missing-${connectorName}`);
+          await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts, connectorName));
         }
         await page.keyboard.press("Escape").catch(() => {});
@@ -1293,7 +1292,7 @@ export class ChatGptBrowserWorker {
     if (!await this.connectorIsSelected(selectedComposer, connectorName)) {
       throw new Error(`ChatGPT composer did not select ${JSON.stringify(connectorName)} connector`);
     }
-    await captureDiagnostic?.(`connector-selected-${connectorName}`);
+    await captureDiagnostic?.("connector-selected");
     return selectedComposer;
   }
 
@@ -1329,7 +1328,11 @@ export class ChatGptBrowserWorker {
       await this.assertPromptAttached(page, prompt);
       return;
     }
-    const selectedComposer = await this.selectConnectors(page, connectorNames, captureDiagnostic);
+    let selectedComposer = await this.activeComposer(page);
+    await selectedComposer.fill("");
+    for (const connectorName of connectorNames) {
+      selectedComposer = await this.selectConnector(page, connectorName, captureDiagnostic);
+    }
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
     await this.insertPromptText(page, ` ${prompt}`);
