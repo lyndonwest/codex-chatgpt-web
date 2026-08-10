@@ -162,6 +162,14 @@ test("GitHub and Native2 turns share one exact Playwright app selector", () => {
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
   expect(workerSource).toContain('await appResult.getAttribute("data-highlighted")');
   expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+  expect(workerSource).toContain('await page.keyboard.press("Escape").catch(() => {})');
+  expect(workerSource).toContain("index < mentionTrigger.length");
+  expect(workerSource).toContain('await composer.press("Backspace")');
+  const fullNameFallbackStart = workerSource.indexOf('let highlighted = await appResult.getAttribute("data-highlighted")');
+  const fullNameFallbackEnd = workerSource.indexOf('await composer.press("Enter")', fullNameFallbackStart);
+  expect(fullNameFallbackStart).toBeGreaterThan(-1);
+  expect(fullNameFallbackEnd).toBeGreaterThan(fullNameFallbackStart);
+  expect(workerSource.slice(fullNameFallbackStart, fullNameFallbackEnd)).not.toContain('composer.fill("")');
   expect(workerSource).toContain('await composer.press("Enter")');
   expect(workerSource).not.toContain("highlightConnectorMenuRow");
   expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
