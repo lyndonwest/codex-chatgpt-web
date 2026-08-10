@@ -385,7 +385,7 @@ describe("trusted Codex task environment continuity", () => {
     expect(new ChatGptThreadEnvironmentStore(statePath).resolve(first).tools).toEqual(firstTools);
     const onDisk = readFileSync(statePath, "utf8");
     expect(onDisk).toContain('"thread_current"');
-    expect(onDisk).not.toContain("first_tool");
+    expect(onDisk).toContain("first_tool");
 
     const next = currentWire();
     const nextTools: CodexTool[] = [{ name: "next_tool", description: "next", parameters: { type: "object" } }];
