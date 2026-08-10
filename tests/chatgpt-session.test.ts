@@ -64,6 +64,11 @@ test("login requires one atomic Temporary Chat composer observation", async () =
   await expect(isAuthenticatedTemporaryChatPage(navigatingPage as never)).resolves.toBe(false);
 });
 
+test("the composer selector tolerates current textarea and contenteditable variants", () => {
+  expect(CHATGPT_COMPOSER_SELECTOR).toContain('textarea[placeholder]');
+  expect(CHATGPT_COMPOSER_SELECTOR).toContain('[contenteditable="true"]');
+});
+
 test("the effort selector identifies the model slider instead of any composer menu button", () => {
   expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('[data-animated-slider-trigger="true"]');
   expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('[data-testid="model-switcher-dropdown-button"]');
