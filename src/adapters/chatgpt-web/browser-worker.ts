@@ -1221,7 +1221,7 @@ export class ChatGptBrowserWorker {
     if (titles.length === 0) {
       return `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`;
     }
-    if (connectorName === CHATGPT_CONNECTOR_NAME && this.config.appName === CHATGPT_CONNECTOR_NAME) {
+    if (connectorName === CHATGPT_CONNECTOR_NAME && this.config.appName === CHATGPT_CONNECTOR_NAME && !titles.includes(connectorName)) {
       const legacyName = LEGACY_CHATGPT_CONNECTOR_NAMES.find(name => titles.includes(name));
       if (legacyName) return legacyChatGptConnectorMigrationMessage(legacyName);
     }
