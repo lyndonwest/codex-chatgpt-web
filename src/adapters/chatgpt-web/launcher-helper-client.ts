@@ -9,6 +9,47 @@ import {
   type ChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 
+export const CHATGPT_RATE_LIMIT_BACKOFF_BASE_MS = 15_000;
+export const CHATGPT_RATE_LIMIT_BACKOFF_MAX_MS = 60_000;
+
+export function chatGptRateLimitBackoffMs(streak: number): number {
+  const normalized = Math.max(1, Math.floor(streak));
+  return Math.min(
+    CHATGPT_RATE_LIMIT_BACKOFF_BASE_MS * (2 ** (normalized - 1)),
+    CHATGPT_RATE_LIMIT_BACKOFF_MAX_MS,
+  );
+}
+
+export function isChatGptRateLimitError(error: unknown): error is ChatGptWebAdapterError {
+  return error instanceof ChatGptWebAdapterError
+    && error.status === 429
+    && error.code === "rate_limit_exceeded";
+}
+
+function rateLimitAbortError(): DOMException {
+  return new DOMException("ChatGPT web turn aborted", "AbortError");
+}
+
+async function abortableRateLimitDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (milliseconds <= 0) return;
+  if (signal?.aborted) throw rateLimitAbortError();
+  await new Promise<void>((resolveDelay, rejectDelay) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) rejectDelay(error);
+      else resolveDelay();
+    };
+    const onAbort = () => finish(rateLimitAbortError());
+    timer = setTimeout(() => finish(), milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 interface PendingTurn {
   turn: BrowserTurn;
   resolve: (value: string) => void;
@@ -130,16 +171,21 @@ export class LauncherBrowserHelperClient {
   private readyResolve?: () => void;
   private readyReject?: (error: Error) => void;
   private readonly pending = new Map<string, PendingTurn>();
+  private rateLimitUntil = 0;
+  private rateLimitStreak = 0;
+  private rateLimitGeneration = 0;
 
   constructor(private readonly config: ResolvedBrowserConfig) {}
 
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    await this.waitForRateLimitCooldown(turn);
+    const generationAtStart = this.rateLimitGeneration;
     const prepared = await turn.prepare();
     try {
       await this.ensureChild();
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      return await new Promise<string>((resolveResult, rejectResult) => {
+      const result = await new Promise<string>((resolveResult, rejectResult) => {
         if (this.pending.has(turn.traceId)) {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
           return;
@@ -191,9 +237,41 @@ export class LauncherBrowserHelperClient {
           },
         }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
+      if (this.rateLimitGeneration === generationAtStart && this.rateLimitStreak > 0) {
+        console.info(`[chatgpt-web] rate-limit backoff cleared after successful browser turn trace=${turn.traceId}`);
+        this.rateLimitStreak = 0;
+        this.rateLimitUntil = 0;
+      }
+      return result;
+    } catch (error) {
+      if (isChatGptRateLimitError(error)) this.recordRateLimit(turn.traceId);
+      throw error;
     } finally {
       prepared.release();
     }
+  }
+
+  private async waitForRateLimitCooldown(turn: BrowserTurn): Promise<void> {
+    for (;;) {
+      const remainingMs = this.rateLimitUntil - Date.now();
+      if (remainingMs <= 0) return;
+      console.warn(
+        `[chatgpt-web] rate-limit backoff waiting trace=${turn.traceId}`
+        + ` delayMs=${remainingMs} streak=${this.rateLimitStreak}`,
+      );
+      await abortableRateLimitDelay(remainingMs, turn.abortSignal);
+    }
+  }
+
+  private recordRateLimit(traceId: string): void {
+    this.rateLimitGeneration += 1;
+    this.rateLimitStreak += 1;
+    const delayMs = chatGptRateLimitBackoffMs(this.rateLimitStreak);
+    this.rateLimitUntil = Math.max(this.rateLimitUntil, Date.now() + delayMs);
+    console.warn(
+      `[chatgpt-web] rate-limit backoff armed trace=${traceId}`
+      + ` delayMs=${delayMs} streak=${this.rateLimitStreak}`,
+    );
   }
 
   async close(): Promise<void> {
