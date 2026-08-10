@@ -153,19 +153,32 @@ test("closing the launcher page is an immediate terminal turn error", async () =
   );
 });
 
-test("connector verification and real tool turns share one Playwright selector", () => {
+test("GitHub and Native2 turns share one exact Playwright app selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource.match(/this\.prepareTemporaryChatSurface\(\s*page/g)?.length).toBe(4);
   expect(workerSource).toContain('"temporary_chat_preparation"');
   expect(workerSource).toContain('if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL)');
-  expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
+  expect(workerSource).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+  expect(workerSource).toContain('const mentionTrigger = `@${connectorName.slice(0, 1).toLowerCase()}`');
+  expect(workerSource).toContain('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])');
+  expect(workerSource).toContain('...(localTools ? [this.config.appName] : [])');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
-  expect(workerSource).toContain("await appResult.click({ force: true, timeout: 10_000 })");
+  expect(workerSource).toContain('await appResult.getAttribute("data-highlighted")');
+  expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+  expect(workerSource).toContain('await page.keyboard.press("Escape").catch(() => {})');
+  expect(workerSource).toContain("index < mentionTrigger.length");
+  expect(workerSource).toContain('await composer.press("Backspace")');
+  const fullNameFallbackStart = workerSource.indexOf('let highlighted = await appResult.getAttribute("data-highlighted")');
+  const fullNameFallbackEnd = workerSource.indexOf('await composer.press("Enter")', fullNameFallbackStart);
+  expect(fullNameFallbackStart).toBeGreaterThan(-1);
+  expect(fullNameFallbackEnd).toBeGreaterThan(fullNameFallbackStart);
+  expect(workerSource.slice(fullNameFallbackStart, fullNameFallbackEnd)).not.toContain('composer.fill("")');
+  expect(workerSource).toContain('await composer.press("Enter")');
   expect(workerSource).not.toContain("highlightConnectorMenuRow");
   expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('appResult.press("Enter")');
-  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
+  expect(workerSource).not.toContain("appResult.click({ force: true");
+  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer, connectorName)");
   expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
 });
@@ -427,10 +440,9 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      connectorSelected = true;
-      calls.push(["click"]);
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedConnector = {
@@ -457,6 +469,11 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     pressSequentially: async (value: string, options: { delay: number }) => {
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
+    },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      connectorSelected = true;
+      calls.push(["press", key]);
     },
   };
   const page = {
@@ -496,12 +513,10 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   expect(resolved).toBe(selectedComposer);
   expect(activeComposerCalls).toBe(3);
   expect(calls).toEqual([
-    ["fill", ""],
-    ["fill", ""],
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["click"],
+    ["press", "Enter"],
     ["waitForSelectedConnector"],
   ]);
 });
@@ -526,10 +541,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       if (menuAttempt === 1) throw timeout;
     },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push("activate");
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedComposer = {
@@ -542,12 +556,20 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       expect(value).toBe("@c");
       calls.push("type");
     },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      selected = true;
+      calls.push("activate");
+    },
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: {
+      press: async (value: string) => { calls.push(`key:${value}`); },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -565,9 +587,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   }, page);
 
   expect(calls).toEqual([
-    "clear",
-    "clear", "focus", "type", "menu:1",
-    "clear", "focus", "type", "menu:2",
+    "focus", "type", "menu:1",
+    "key:Escape", "key:Backspace", "key:Backspace",
+    "focus", "type", "menu:2",
     "activate", "selected",
   ]);
 });
@@ -585,10 +607,9 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push(["selectConnector"]);
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedComposer = {
@@ -599,6 +620,11 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      selected = true;
+      calls.push(["selectConnector"]);
+    },
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
@@ -636,7 +662,6 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   }, page, "context", true);
 
   expect(calls).toEqual([
-    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["type", "@c"],
