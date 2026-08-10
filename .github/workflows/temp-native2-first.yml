@@ -1,0 +1,63 @@
+name: Temporary Native2-first patch
+
+on:
+  push:
+    branches:
+      - lyndon/native2-before-github
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: lyndon/native2-before-github
+      - name: Apply focused connector-order patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          worker = Path('src/adapters/chatgpt-web/browser-worker.ts')
+          text = worker.read_text()
+          old = '''    const connectorNames = [
+                ...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : []),
+                ...(localTools ? [this.config.appName] : []),
+              ];'''
+          new = '''    const connectorNames = [
+                ...(localTools ? [this.config.appName] : []),
+                ...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : []),
+              ];'''
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one connectorNames block, found {text.count(old)}')
+          worker.write_text(text.replace(old, new, 1))
+
+          test = Path('tests/chatgpt-web-app-routing-contract.test.ts')
+          text = test.read_text()
+          old = '''    expect(worker).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+              expect(worker).toContain("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])");
+              expect(worker).toContain("...(localTools ? [this.config.appName] : [])");'''
+          new = '''    expect(worker).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+              expect(worker).toContain("...(localTools ? [this.config.appName] : [])");
+              expect(worker).toContain("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])");
+              const native2First = worker.indexOf("...(localTools ? [this.config.appName] : [])");
+              const githubSecond = worker.indexOf("...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])", native2First);
+              expect(native2First).toBeGreaterThan(-1);
+              expect(githubSecond).toBeGreaterThan(native2First);'''
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one routing contract block, found {text.count(old)}')
+          test.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff --exit-code -- .github/workflows/temp-native2-first.yml || true
+          git diff -- src/adapters/chatgpt-web/browser-worker.ts tests/chatgpt-web-app-routing-contract.test.ts
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/adapters/chatgpt-web/browser-worker.ts tests/chatgpt-web-app-routing-contract.test.ts
+          git commit -m 'Select Native2 before GitHub on dual-app turns'
+          git push origin HEAD:lyndon/native2-before-github
