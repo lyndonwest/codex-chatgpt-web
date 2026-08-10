@@ -89,10 +89,10 @@ export function buildChatGptWebModel(
     // provider cannot decrypt that cross-backend payload, so every routed Web model must stay on
     // the native V1 surface where `message` and `fork_context` remain ordinary Codex context.
     multi_agent_version: "v1",
-    // Keep every routed Web model inside Codex's native code-mode and subagent model registry.
-    // Pro's lack of local computer tools is enforced by the adapter runtime; `requiresPro` is only
-    // an account-entitlement gate and must not make the model disappear from native orchestration.
-    tool_mode: config.mode === "full" ? template.tool_mode : null,
+    // Codex 0.146/0.147 can omit the native command surface from spawned Web turns when a routed
+    // model inherits code_mode_only. Keep routed Web models in Direct mode so Full Harness sees the
+    // authoritative top-level native tools; the adapter still enforces account/tool capabilities.
+    tool_mode: null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
