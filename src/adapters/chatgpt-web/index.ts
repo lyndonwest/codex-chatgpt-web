@@ -348,6 +348,14 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+      const correlationIdentity = extractChatGptTurnIdentity(parsed);
+      console.info(
+        `[chatgpt-web] trace correlation trace=${traceId}`
+        + ` thread=${correlationIdentity.threadId ?? "none"}`
+        + ` turn=${correlationIdentity.turnId ?? "none"}`
+        + ` previous_response_id=${parsed.previousResponseId ?? "none"}`
+        + ` compaction=${parsed._compactionRequest ? 1 : 0}`,
+      );
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
