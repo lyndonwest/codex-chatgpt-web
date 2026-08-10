@@ -160,10 +160,13 @@ test("GitHub and Native2 turns share one exact Playwright app selector", () => {
   expect(workerSource).toContain('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])');
   expect(workerSource).toContain('...(localTools ? [this.config.appName] : [])');
   expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
-  expect(workerSource).toContain("await appResult.click({ force: true, timeout: 10_000 })");
+  expect(workerSource).toContain('await appResult.getAttribute("data-highlighted")');
+  expect(workerSource).toContain('connectorName.replace(/\\s+/g, "")');
+  expect(workerSource).toContain('await composer.press("Enter")');
   expect(workerSource).not.toContain("highlightConnectorMenuRow");
   expect(workerSource).not.toContain('await appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('appResult.press("Enter")');
+  expect(workerSource).not.toContain("appResult.click({ force: true");
   expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer, connectorName)");
   expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
@@ -255,10 +258,9 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      connectorSelected = true;
-      calls.push(["click"]);
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedConnector = {
@@ -285,6 +287,11 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     pressSequentially: async (value: string, options: { delay: number }) => {
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
+    },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      connectorSelected = true;
+      calls.push(["press", key]);
     },
   };
   const page = {
@@ -327,7 +334,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["click"],
+    ["press", "Enter"],
     ["waitForSelectedConnector"],
   ]);
 });
@@ -352,10 +359,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       if (menuAttempt === 1) throw timeout;
     },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push("activate");
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedComposer = {
@@ -367,6 +373,11 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     pressSequentially: async (value: string) => {
       expect(value).toBe("@c");
       calls.push("type");
+    },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      selected = true;
+      calls.push("activate");
     },
   };
   const page = {
@@ -414,10 +425,9 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push(["selectConnector"]);
+    getAttribute: async (name: string) => {
+      expect(name).toBe("data-highlighted");
+      return "";
     },
   };
   const selectedComposer = {
@@ -428,6 +438,11 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
+    press: async (key: string) => {
+      expect(key).toBe("Enter");
+      selected = true;
+      calls.push(["selectConnector"]);
+    },
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),

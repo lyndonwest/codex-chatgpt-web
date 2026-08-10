@@ -1285,7 +1285,25 @@ export class ChatGptBrowserWorker {
         + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
       );
     }
-    await appResult.click({ force: true, timeout: 10_000 });
+    // ChatGPT commits mention-menu selection from the composer/menu keyboard state. Launcher
+    // verification can keep the embedded browser surface hidden, so pointer activation can fail
+    // even though the exact app row is rendered. Prove the row is keyboard-highlighted, then
+    // submit Enter through the composer. This works for both GitHub and Codex Native2 without
+    // relying on viewport geometry or an untrusted synthetic click.
+    let highlighted = await appResult.getAttribute("data-highlighted");
+    if (highlighted === null) {
+      await composer.fill("");
+      await composer.focus();
+      await composer.pressSequentially(`@${connectorName.replace(/\s+/g, "")}`, { delay: 25 });
+      await appResult.waitFor({ state: "visible", timeout: 2_500 });
+      highlighted = await appResult.getAttribute("data-highlighted");
+    }
+    if (highlighted === null) {
+      throw new Error(
+        `ChatGPT connector row ${JSON.stringify(connectorName)} is visible but not keyboard-highlighted`,
+      );
+    }
+    await composer.press("Enter");
     const selectedComposer = await this.activeComposer(page);
     const selectedConnector = this.selectedConnectorControl(selectedComposer, connectorName);
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
