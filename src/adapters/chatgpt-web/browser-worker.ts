@@ -1292,8 +1292,14 @@ export class ChatGptBrowserWorker {
     // relying on viewport geometry or an untrusted synthetic click.
     let highlighted = await appResult.getAttribute("data-highlighted");
     if (highlighted === null) {
-      await composer.fill("");
+      // Remove only the temporary mention text. Clearing the composer here would also
+      // remove connector pills selected earlier in a multi-connector turn (for example,
+      // GitHub before Codex Native2).
+      await page.keyboard.press("Escape").catch(() => {});
       await composer.focus();
+      for (let index = 0; index < mentionTrigger.length; index += 1) {
+        await composer.press("Backspace");
+      }
       await composer.pressSequentially(`@${connectorName.replace(/\s+/g, "")}`, { delay: 25 });
       await appResult.waitFor({ state: "visible", timeout: 2_500 });
       highlighted = await appResult.getAttribute("data-highlighted");
