@@ -16,26 +16,36 @@ test("login keeps the established turn composer contract", () => {
   expect(turnSelectors).not.toContain("form textarea[placeholder]");
 });
 
-test("login requires one atomic Temporary Chat composer observation", async () => {
+test("login requires one atomic authenticated Temporary Chat composer observation", async () => {
   expect(chatGptAuthenticationSurfaceReady({
     url: "https://chatgpt.com/auth/login",
     visibleComposerCount: 1,
+    sessionAuthenticated: true,
   })).toBe(false);
   expect(chatGptAuthenticationSurfaceReady({
     url: "https://chatgpt.com/?temporary-chat=true",
     visibleComposerCount: 0,
+    sessionAuthenticated: true,
   })).toBe(false);
   expect(chatGptAuthenticationSurfaceReady({
     url: "https://chatgpt.com/?temporary-chat=true",
     visibleComposerCount: 2,
+    sessionAuthenticated: true,
   })).toBe(false);
   expect(chatGptAuthenticationSurfaceReady({
     url: "https://example.com/?temporary-chat=true",
     visibleComposerCount: 1,
+    sessionAuthenticated: true,
   })).toBe(false);
   expect(chatGptAuthenticationSurfaceReady({
     url: "https://chatgpt.com/?temporary-chat=true",
     visibleComposerCount: 1,
+    sessionAuthenticated: false,
+  })).toBe(false);
+  expect(chatGptAuthenticationSurfaceReady({
+    url: "https://chatgpt.com/?temporary-chat=true",
+    visibleComposerCount: 1,
+    sessionAuthenticated: true,
   })).toBe(true);
 
   let evaluations = 0;
@@ -48,6 +58,7 @@ test("login requires one atomic Temporary Chat composer observation", async () =
       return {
         url: "https://chatgpt.com/?temporary-chat=true",
         visibleComposerCount: 1,
+        sessionAuthenticated: true,
       };
     },
   };
@@ -57,6 +68,19 @@ test("login requires one atomic Temporary Chat composer observation", async () =
   expect(callbackSource).toContain("document.querySelectorAll(composerSelector)");
   expect(callbackSource).toContain("bounds.width > 0");
   expect(callbackSource).toContain("bounds.height > 0");
+  expect(callbackSource).toContain('/api/auth/session');
+  expect(callbackSource).toContain('credentials: "include"');
+  expect(callbackSource).toContain('cache: "no-store"');
+  expect(callbackSource).toContain("session?.user && session?.accessToken");
+
+  const anonymousPage = {
+    evaluate: async () => ({
+      url: "https://chatgpt.com/?temporary-chat=true",
+      visibleComposerCount: 1,
+      sessionAuthenticated: false,
+    }),
+  };
+  await expect(isAuthenticatedTemporaryChatPage(anonymousPage as never)).resolves.toBe(false);
 
   const navigatingPage = {
     evaluate: async () => { throw new Error("Execution context was destroyed"); },
