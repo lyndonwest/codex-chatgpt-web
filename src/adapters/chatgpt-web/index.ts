@@ -6,6 +6,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
+import { chatGptNative2Allowed } from "./capability-routing";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -229,6 +230,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
+        useGitHubApp: !parsed._compactionRequest,
         prepare: async () => ({
           ...compileChatGptWebPrompt(
             checkpointInput.parsed,
@@ -264,6 +266,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
+      useGitHubApp: !parsed._compactionRequest,
       prepare: async () => {
         const turnToken = await broker.register(
           environment,
@@ -324,9 +327,11 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           + "Codex MultiAgent V2 encrypts cross-backend task payloads.",
         );
       }
-      const turnCapabilities = parsed._compactionRequest
-        ? { ...configuredCapabilities, localToolsEnabled: false }
-        : configuredCapabilities;
+      const native2Allowed = configuredCapabilities.localToolsEnabled && chatGptNative2Allowed(parsed);
+      const turnCapabilities: ChatGptWebCapabilities = {
+        ...configuredCapabilities,
+        localToolsEnabled: !parsed._compactionRequest && native2Allowed,
+      };
       const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
@@ -376,7 +381,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                 events.push(event);
                 emit(event);
               };
-              if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
+              if (!parsed._compactionRequest) emitProContextWarning(parsed, configuredCapabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -431,7 +436,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitRound);
+            if (!parsed._compactionRequest) emitProContextWarning(parsed, configuredCapabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken
