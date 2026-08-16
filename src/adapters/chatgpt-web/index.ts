@@ -6,7 +6,6 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
-import { chatGptNative2Allowed } from "./capability-routing";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -328,11 +327,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           + "Codex MultiAgent V2 encrypts cross-backend task payloads.",
         );
       }
-      const native2Allowed = configuredCapabilities.localToolsEnabled && chatGptNative2Allowed(parsed);
-      const turnCapabilities: ChatGptWebCapabilities = {
-        ...configuredCapabilities,
-        localToolsEnabled: !parsed._compactionRequest && native2Allowed,
-      };
+      const turnCapabilities = parsed._compactionRequest
+        ? { ...configuredCapabilities, localToolsEnabled: false }
+        : configuredCapabilities;
       const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       const retryKey = `${executionNamespace}:${chatGptTurnRetryKey(parsed)}`;
       const exhaustedRetry = chatGptWebTurnRetryPolicy.exhaustedError(retryKey);
