@@ -58,6 +58,12 @@ describe("ChatGPT Web Native2 routing", () => {
     ]))).toBe(false);
   });
 
+  test("negative instructions about retries do not disable Native2", () => {
+    expect(chatGptNative2Allowed(parsed([
+      { role: "user", content: "This is a direct Native2 connectivity test.\nDo not retry using another agent if Native2 fails." },
+    ]))).toBe(true);
+  });
+
   test("explicit directive remains authoritative over prose in the same message", () => {
     expect(chatGptNative2Allowed(parsed([
       { role: "user", content: "native2_allowed: true\nDo not use Native2 unless needed." },
