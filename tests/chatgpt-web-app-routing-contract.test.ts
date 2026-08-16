@@ -7,8 +7,11 @@ const helperClient = readFileSync("src/adapters/chatgpt-web/launcher-helper-clie
 const helperMain = readFileSync("src/adapters/chatgpt-web/browser-helper-main.ts", "utf8");
 
 describe("GitHub-first Web app routing contract", () => {
-  test("normal turns attach GitHub and Native2 remains directive-gated", () => {
-    expect(adapter).toContain("chatGptNative2Allowed(parsed)");
+  test("normal turns attach Native2 then GitHub while compaction remains tool-free", () => {
+    expect(adapter).toContain("const turnCapabilities = parsed._compactionRequest");
+    expect(adapter).toContain("? { ...configuredCapabilities, localToolsEnabled: false }");
+    expect(adapter).toContain(": configuredCapabilities;");
+    expect(adapter).not.toContain("chatGptNative2Allowed(parsed)");
     expect(adapter).toContain("useGitHubApp: !parsed._compactionRequest");
     expect(worker).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
     expect(worker).toContain("...(localTools ? [this.config.appName] : [])");
