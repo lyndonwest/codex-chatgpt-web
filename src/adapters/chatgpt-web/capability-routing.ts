@@ -15,7 +15,7 @@ interface Native2AuthorizationSignal {
 
 const NATIVE2_NAME = /\b(?:codex\s+)?native\s*2\b/i;
 const NATIVE2_DIRECTIVE = /native2_allowed\s*[:=]\s*(true|false)/gi;
-const NATIVE2_NEGATIVE = /(?:\bdo\s+not\b|\bdon['’]?t\b|\bnever\b|\bwithout\b)[^\n.]{0,80}\b(?:codex\s+)?native\s*2\b|\b(?:codex\s+)?native\s*2\b[^\n.]{0,80}\b(?:not\s+allowed|disallowed|disabled|forbidden|denied)\b/i;
+const NATIVE2_NEGATIVE = /(?:\bdo\s+not\b|\bdon['’]?t\b|\bnever\b)\s+(?:use|invoke|call|attach|enable|allow|authorize|expose|connect)\s+(?:codex\s+)?native\s*2\b|\b(?:disable|forbid|deny)\s+(?:codex\s+)?native\s*2\b|\b(?:without|no)\s+(?:codex\s+)?native\s*2\b|\b(?:codex\s+)?native\s*2\b[^\n.]{0,48}\b(?:not\s+allowed|disallowed|disabled|forbidden|denied|(?:should|must)\s+not\s+(?:be\s+)?(?:used|invoked|called|attached|enabled|allowed))\b/i;
 
 function native2AuthorizationSignal(text: string): Native2AuthorizationSignal | undefined {
   // Keep the explicit machine-readable switch authoritative when it is present, while accepting
