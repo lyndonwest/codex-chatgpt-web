@@ -77,13 +77,14 @@ test("packaged launcher owns a detached checksummed updater for every release pl
   assert.doesNotMatch(worker, /backup/i);
 });
 
-test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
+test("CI packages and smoke-launches on Linux", () => {
   const ci = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
   const release = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
-  assert.match(ci, /macos-15, ubuntu-latest, windows-latest/);
+  assert.match(ci, /runs-on: ubuntu-latest/);
+  assert.doesNotMatch(ci, /macos-15/);
+  assert.doesNotMatch(ci, /windows-latest/);
   assert.match(ci, /bun run app:package/);
   assert.match(ci, /bun run app:smoke/);
-  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.3\.14/);
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"]) {
     assert.match(release, new RegExp(runner));
   }
