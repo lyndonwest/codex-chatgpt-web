@@ -681,6 +681,91 @@ test("launcher stops an unhealthy managed runtime before reconnecting the alias"
   }
 });
 
+test("launcher waits for a tunnel that is still starting when connect exits nonzero", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-managed-tunnel-start-race-"));
+  const binaryPath = path.join(root, "tunnel-client");
+  const runtimeKeyFile = path.join(root, "runtime.key");
+  const profileDir = path.join(root, "profiles");
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(binaryPath, "binary");
+  fs.writeFileSync(runtimeKeyFile, "runtime-key");
+  fs.writeFileSync(path.join(profileDir, "codex-chatgpt-web.yaml"), "profile");
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const events = [];
+  let reads = 0;
+  supervisor.readTunnelHealth = async () => {
+    reads += 1;
+    if (reads === 1) {
+      return {
+        ready: false,
+        pid: null,
+        state: "stopped",
+        processRunning: false,
+        statusKnown: true,
+        detail: "state=stopped; process_running=false",
+      };
+    }
+    if (reads === 2) {
+      return {
+        ready: false,
+        pid: 123_456_775,
+        state: "starting",
+        processRunning: true,
+        statusKnown: true,
+        detail: "state=starting; process_running=true; healthy=false; ready=false",
+      };
+    }
+    return {
+      ready: true,
+      pid: 123_456_775,
+      state: "ready",
+      processRunning: true,
+      statusKnown: true,
+      detail: "state=ready; process_running=true; healthy=true; ready=true",
+    };
+  };
+  supervisor.runTunnelStopCommand = async () => {
+    events.push("stop");
+    return { code: 0, output: "{}" };
+  };
+  supervisor.waitForTunnelStopped = async () => { events.push("stopped"); };
+  supervisor.runTunnelConnectCommand = async () => {
+    events.push("connect");
+    return {
+      code: 1,
+      stdout: JSON.stringify({
+        runtime_state: "starting",
+        process_running: true,
+        healthy: false,
+        ready: false,
+      }),
+      stderr: "",
+    };
+  };
+  supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+  try {
+    await supervisor.startTunnel({
+      mode: "full",
+      tunnel: {
+        binaryPath,
+        runtimeKeyFile,
+        profileDir,
+        profileName: "codex-chatgpt-web",
+      },
+    });
+    assert.deepEqual(events, ["stop", "stopped", "connect", "monitor"]);
+    assert.equal(supervisor.tunnel?.pid, 123_456_775);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("failed tunnel startup accepts an absent alias only after its recorded process has exited", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-dead-cleanup-"));
   const binaryPath = path.join(root, "tunnel-client");
