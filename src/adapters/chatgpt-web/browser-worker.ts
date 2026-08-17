@@ -255,15 +255,30 @@ const browserStageTimeouts = {
 } as const;
 
 /**
- * A six-figure Input.insertText can make current ChatGPT Lexical surfaces rewrite text inside the
- * first edit even when its final UTF-16 length is unchanged. Bound only the native edit operation;
- * the resulting user message remains one exact prompt, and every prefix is still verified before
- * another irreversible edit. This is independent of model context and compaction limits.
+ * Repeated Input.insertText edits can be silently dropped by current ChatGPT Lexical surfaces,
+ * while a six-figure native edit can rewrite text even when its final UTF-16 length is unchanged.
+ * Prompt attachment therefore tries one atomic replacement and verifies it exactly. Bounded native
+ * edits are recovery only, and every prefix is verified before another irreversible edit. This is
+ * independent of model context and compaction limits.
  */
 export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 16_000;
 export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
+export const CHATGPT_COMPOSER_DOCUMENT_START_KEY = process.platform === "darwin"
+  ? "Meta+ArrowUp"
+  : "Control+Home";
+
+export class ChatGptPromptInsertionError extends ChatGptWebAdapterError {
+  constructor(message: string) {
+    super(message, {
+      status: 502,
+      errorType: "server_error",
+      code: "chatgpt_composer_insertion_failed",
+      retryable: true,
+    });
+  }
+}
 
 function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
@@ -1172,7 +1187,7 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < prompt.length && prompt[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
+    throw new ChatGptPromptInsertionError(
       `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
     );
   }
@@ -1223,7 +1238,6 @@ export class ChatGptBrowserWorker {
     catalogRefreshAvailable = false,
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
-    await composer.fill("");
     if (await this.connectorIsSelected(composer)) {
       await captureDiagnostic?.("connector-already-selected");
       return composer;
@@ -1239,7 +1253,6 @@ export class ChatGptBrowserWorker {
     for (;;) {
       triggerAttempts += 1;
       composer = await this.activeComposer(page);
-      await composer.fill("");
       await composer.focus();
       await settleChatGptUi();
       await composer.pressSequentially("@c", { delay: 25 });
@@ -1271,6 +1284,9 @@ export class ChatGptBrowserWorker {
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
         }
+        await composer.press("Escape").catch(() => {});
+        await composer.press("Backspace").catch(() => {});
+        await composer.press("Backspace").catch(() => {});
       }
     }
     if (await appResult.count() !== 1) {
@@ -1310,12 +1326,30 @@ export class ChatGptBrowserWorker {
     catalogRefreshAvailable = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
-    if (!localTools) {
-      const composer = await this.activeComposer(page);
-      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-      // then transport the complete text in one CDP Input.insertText command.
+    let composer = await this.activeComposer(page);
+    await composer.fill(prompt);
+    try {
+      await this.assertPromptAttached(page, prompt, abortSignal);
+      if (!localTools) return;
+
+      // Mention completion needs a token boundary. Put the connector pill before the already
+      // verified prompt so fill() never removes it and no trigger text follows the prompt.
+      await composer.focus();
+      await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_START_KEY);
+      composer = await this.selectConnector(page, captureDiagnostic, catalogRefreshAvailable);
+      await this.assertPromptAttached(page, prompt, abortSignal);
+      return;
+    } catch (error) {
+      if (!(error instanceof ChatGptPromptInsertionError)) throw error;
+      console.warn(
+        `[chatgpt-web] verified composer fill did not preserve the prompt; falling back to bounded edits`
+        + ` promptChars=${prompt.length}`,
+      );
+      composer = await this.activeComposer(page);
       await composer.fill("");
+    }
+
+    if (!localTools) {
       await composer.focus();
       await this.insertPromptText(page, prompt, abortSignal);
       await this.assertPromptAttached(page, prompt, abortSignal);
@@ -1438,7 +1472,7 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < expected.length && expected[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
+    throw new ChatGptPromptInsertionError(
       `ChatGPT composer did not commit a complete prompt insertion chunk`
       + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
     );
