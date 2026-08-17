@@ -741,7 +741,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("caps automatic retryable browser sends at three retries for one native turn", async () => {
+  test("caps deterministic composer insertion failures at three retries for one native turn", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h4-retry-budget-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -753,10 +753,10 @@ describe("ChatGPT outer-native harness v4", () => {
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
       browserStarts += 1;
-      throw new ChatGptWebAdapterError("ChatGPT ended the turn with 'Something went wrong'. Retry the turn.", {
+      throw new ChatGptWebAdapterError("ChatGPT composer did not commit a complete prompt insertion chunk", {
         status: 502,
         errorType: "server_error",
-        code: "upstream_server_error",
+        code: "chatgpt_composer_insertion_failed",
         retryable: true,
       });
     };
@@ -769,7 +769,7 @@ describe("ChatGPT outer-native harness v4", () => {
           event => events.push(event),
         );
         const error = events.at(-1);
-        expect(error).toMatchObject({ type: "error", code: "upstream_server_error" });
+        expect(error).toMatchObject({ type: "error", code: "chatgpt_composer_insertion_failed" });
         expect((error as Extract<AdapterEvent, { type: "error" }>).retryable)
           .toBe(attempt < MAX_CHATGPT_WEB_TURN_RETRIES);
       }

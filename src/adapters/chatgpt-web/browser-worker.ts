@@ -284,6 +284,21 @@ function promptInsertChunkEnd(text: string, offset: number): number {
   return end;
 }
 
+export class ChatGptPromptInsertionError extends ChatGptWebAdapterError {
+  constructor(
+    message: string,
+    readonly observed: string,
+  ) {
+    super(message, {
+      status: 502,
+      errorType: "server_error",
+      code: "chatgpt_composer_insertion_failed",
+      retryable: true,
+    });
+    this.name = "ChatGptPromptInsertionError";
+  }
+}
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1212,8 +1227,9 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < prompt.length && prompt[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
+    throw new ChatGptPromptInsertionError(
       `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      observed,
     );
   }
 
@@ -1479,18 +1495,73 @@ private async attachPrompt(
     }
   }
 
+  private async promptCaretState(page: Page): Promise<{
+    textChars: number;
+    focused: boolean;
+    collapsed: boolean | null;
+    anchorInside: boolean;
+    focusInside: boolean;
+    anchorOffset: number | null;
+    focusOffset: number | null;
+  }> {
+    const composer = await this.activeComposer(page);
+    return composer.evaluate(element => {
+      const selection = window.getSelection();
+      const anchorInside = selection?.anchorNode ? element.contains(selection.anchorNode) : false;
+      const focusInside = selection?.focusNode ? element.contains(selection.focusNode) : false;
+      return {
+        textChars: (element.textContent ?? "").length,
+        focused: document.activeElement === element || element.contains(document.activeElement),
+        collapsed: selection?.isCollapsed ?? null,
+        anchorInside,
+        focusInside,
+        anchorOffset: anchorInside ? selection?.anchorOffset ?? null : null,
+        focusOffset: focusInside ? selection?.focusOffset ?? null : null,
+      };
+    }, undefined, { timeout: 20_000 });
+  }
+
   private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
     for (let offset = 0; offset < text.length;) {
       throwIfPromptAttachmentAborted(abortSignal);
       const end = promptInsertChunkEnd(text, offset);
-      await page.keyboard.insertText(text.slice(offset, end));
+      const chunk = text.slice(offset, end);
+      const expectedBefore = text.slice(0, offset).trimStart();
+      if (process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1") {
+        console.info(
+          `[chatgpt-web] composer insertion before offset=${offset} end=${end}`
+          + ` state=${JSON.stringify(await this.promptCaretState(page))}`,
+        );
+      }
+      await page.keyboard.insertText(chunk);
       throwIfPromptAttachmentAborted(abortSignal);
       if (end < text.length) {
         // Lexical can rebuild the active block after an exact commit and move its native selection.
         // Re-anchor only after the verified prefix is stable, before the next irreversible edit.
         const expectedPrefix = text.slice(0, end).trimStart();
-        await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
+        try {
+          await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
+        } catch (error) {
+          if (!(error instanceof ChatGptPromptInsertionError) || error.observed !== expectedBefore) throw error;
+          console.warn(
+            `[chatgpt-web] composer insertion made no progress; retrying one chunk`
+            + ` offset=${offset} end=${end} state=${JSON.stringify(await this.promptCaretState(page))}`,
+          );
+          const composer = await this.activeComposer(page);
+          await composer.focus();
+          if (expectedBefore.length > 0) await this.reanchorPromptCaret(page, abortSignal);
+          await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
+          await page.keyboard.insertText(chunk);
+          throwIfPromptAttachmentAborted(abortSignal);
+          await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
+        }
         await this.reanchorPromptCaret(page, abortSignal);
+        if (process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1") {
+          console.info(
+            `[chatgpt-web] composer insertion committed offset=${offset} end=${end}`
+            + ` state=${JSON.stringify(await this.promptCaretState(page))}`,
+          );
+        }
       }
       offset = end;
     }
@@ -1513,9 +1584,10 @@ private async attachPrompt(
     throwIfPromptAttachmentAborted(abortSignal);
     let commonPrefix = 0;
     while (commonPrefix < expected.length && expected[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
+    throw new ChatGptPromptInsertionError(
       `ChatGPT composer did not commit a complete prompt insertion chunk`
       + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      observed,
     );
   }
 
