@@ -151,6 +151,23 @@ test("closing the launcher page is an immediate terminal turn error", async () =
   );
 });
 
+test("GitHub and Native2 turns preserve catalog refresh and connector ordering", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain('CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub"');
+  expect(workerSource).toContain('const mentionTrigger = `@${connectorName.slice(0, 1).toLowerCase()}`');
+  expect(workerSource).toContain('...(localTools ? [this.config.appName] : [])');
+  expect(workerSource).toContain('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])');
+  expect(workerSource).toContain('await appResult.getAttribute("data-highlighted")');
+  expect(workerSource).toContain('await composer.press("Enter")');
+  expect(workerSource).toContain('"connector_catalog_refresh"');
+  const connectors = workerSource.indexOf('const connectorNames = [');
+  const native2 = workerSource.indexOf('...(localTools ? [this.config.appName] : [])', connectors);
+  const github = workerSource.indexOf('...(useGitHubApp ? [CHATGPT_GITHUB_CONNECTOR_NAME] : [])', native2);
+  expect(connectors).toBeGreaterThan(-1);
+  expect(native2).toBeGreaterThan(connectors);
+  expect(github).toBeGreaterThan(native2);
+});
+
 test("active composer resolution waits for exactly one visible editor", async () => {
   const composer = { id: "active" };
   const counts = [2, 1];
@@ -188,12 +205,12 @@ test("large read-only context uses one verified atomic fill before bounded recov
     },
   };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+    attachPrompt(page: unknown, prompt: string, localTools: boolean, useGitHubApp: boolean): Promise<void>;
   }).attachPrompt;
   await attachPrompt.call({
     activeComposer: async () => composer,
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
-  }, page, prompt, false);
+  }, page, prompt, false, false);
 
   expect(calls).toEqual([["fill", prompt]]);
   expect(asserted).toBe(prompt);
@@ -229,7 +246,7 @@ test("an inexact atomic fill falls back to bounded insertion with a structured e
   expect(assertions).toBe(2);
 });
 
-test("tool-capable prompts prepend the connector after exact fill verification", async () => {
+test("tool-capable repository prompts prepend Native2 then GitHub after exact fill verification", async () => {
   const calls: Array<[string, string?]> = [];
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
@@ -238,24 +255,26 @@ test("tool-capable prompts prepend the connector after exact fill verification",
   const selectedComposer = { id: "selected" };
   const page = { keyboard: { press: async (value: string) => { calls.push(["press", value]); } } };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+    attachPrompt(page: unknown, prompt: string, localTools: boolean, useGitHubApp: boolean): Promise<void>;
   }).attachPrompt;
 
   await attachPrompt.call({
     activeComposer: async () => initialComposer,
-    selectConnector: async () => {
-      calls.push(["selectConnector"]);
+    selectConnector: async (_page: unknown, _capture: unknown, _refresh: boolean, name: string) => {
+      calls.push(["selectConnector", name]);
       return selectedComposer;
     },
     assertPromptAttached: async () => { calls.push(["assertPrompt"]); },
-  }, page, "context", true);
+    config: { appName: "Codex Native2" },
+  }, page, "context", true, true);
 
   expect(calls).toEqual([
     ["fill", "context"],
     ["assertPrompt"],
     ["focus"],
     ["press", CHATGPT_COMPOSER_DOCUMENT_START_KEY],
-    ["selectConnector"],
+    ["selectConnector", "Codex Native2"],
+    ["selectConnector", "GitHub"],
     ["assertPrompt"],
   ]);
 });

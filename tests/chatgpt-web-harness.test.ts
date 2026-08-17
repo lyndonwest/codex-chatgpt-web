@@ -89,7 +89,7 @@ function parsed(developerText?: string): CodexParsedRequest {
       tools,
       messages: [
         ...(developerText ? [{ role: "developer" as const, content: developerText, timestamp: 1 }] : []),
-        { role: "user", content: "Inspect the project", timestamp: 2 },
+        { role: "user", content: "native2_allowed: true\nInspect the project", timestamp: 2 },
       ],
     },
     options: { reasoning: "high" },
