@@ -10,6 +10,8 @@ test("login keeps the established turn composer contract", () => {
   expect(turnSelectors).toContain('[data-testid="prompt-textarea"]');
   expect(turnSelectors).toContain("#prompt-textarea");
   expect(turnSelectors).toContain('[contenteditable="true"][data-lexical-editor="true"]');
+  expect(turnSelectors).toContain('textarea[placeholder]');
+  expect(turnSelectors).toContain('[contenteditable="true"]');
   expect(turnSelectors).not.toContain('form [contenteditable="true"]');
   expect(turnSelectors).not.toContain("form textarea[placeholder]");
 });
