@@ -799,9 +799,16 @@ class RuntimeSupervisor {
       if (stopped.code === 0) await this.waitForTunnelStopped(config);
       const connected = await this.runTunnelConnectCommand(config);
       if (connected.code !== 0) {
-        throw new Error(
-          `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
-        );
+        const health = await this.waitForKnownTunnelStatus(config);
+        if (!health.ready && health.processRunning !== true) {
+          throw new Error(
+            `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
+          );
+        }
+        this.logger.info("runtime.tunnel_connect_in_progress", {
+          detail: health.detail,
+          diagnostic: tunnelControlDiagnostic(connected),
+        });
       }
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, operationName);
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
