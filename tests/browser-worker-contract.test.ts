@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptInsertionError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -259,6 +259,103 @@ test("multi-chunk prompt insertion repairs a drifted Lexical caret after each ex
     ["reanchor"],
     ["insertText", "457"],
   ]);
+});
+
+test("a silent prompt chunk no-op is re-anchored and replayed exactly once", async () => {
+  const prompt = "a".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS) + "tail";
+  let attached = "";
+  let insertAttempts = 0;
+  const pressed: string[] = [];
+  let focuses = 0;
+  const page = {
+    keyboard: {
+      insertText: async (value: string) => {
+        insertAttempts += 1;
+        if (insertAttempts > 1) attached += value;
+      },
+      press: async (value: string) => { pressed.push(value); },
+    },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+
+  await insertPromptText.call({
+    activeComposer: async () => ({ focus: async () => { focuses += 1; } }),
+    promptCaretState: async () => ({ focused: true }),
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      if (attached !== expected) throw new ChatGptPromptInsertionError("silent no-op", attached);
+    },
+    reanchorPromptCaret: async () => {},
+  }, page, prompt);
+
+  expect(attached).toBe(prompt);
+  expect(insertAttempts).toBe(3);
+  expect(pressed).toEqual([CHATGPT_COMPOSER_DOCUMENT_END_KEY]);
+  expect(focuses).toBe(1);
+});
+
+test("a partial or divergent prompt chunk is never replayed", async () => {
+  const prompt = "a".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS) + "tail";
+  let attached = "";
+  let insertAttempts = 0;
+  let recoveryActions = 0;
+  const page = {
+    keyboard: {
+      insertText: async (value: string) => {
+        insertAttempts += 1;
+        attached += value.slice(0, 31) + "!";
+      },
+      press: async () => { recoveryActions += 1; },
+    },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+
+  const failure = insertPromptText.call({
+    activeComposer: async () => ({ focus: async () => { recoveryActions += 1; } }),
+    promptCaretState: async () => ({ focused: true }),
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      throw new ChatGptPromptInsertionError("partial insertion", attached);
+    },
+    reanchorPromptCaret: async () => { recoveryActions += 1; },
+  }, page, prompt);
+
+  await expect(failure).rejects.toMatchObject({
+    code: "chatgpt_composer_insertion_failed",
+    observed: attached,
+  });
+  expect(insertAttempts).toBe(1);
+  expect(recoveryActions).toBe(0);
+});
+
+test("a repeated prompt chunk no-op becomes a structured bounded-retry failure", async () => {
+  const prompt = "a".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS) + "tail";
+  const page = {
+    keyboard: {
+      insertText: async () => {},
+      press: async () => {},
+    },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+
+  const failure = insertPromptText.call({
+    activeComposer: async () => ({ focus: async () => {} }),
+    promptCaretState: async () => ({ focused: true }),
+    waitForPromptChunkAttached: async (_page: unknown, expected: string) => {
+      throw new ChatGptPromptInsertionError("silent no-op", "");
+    },
+    reanchorPromptCaret: async () => {},
+  }, page, prompt);
+
+  await expect(failure).rejects.toMatchObject({
+    code: "chatgpt_composer_insertion_failed",
+    retryable: true,
+    status: 502,
+  });
 });
 
 test("prompt insertion never sends the six-figure native edit that rewrites the first 100k prefix", async () => {
