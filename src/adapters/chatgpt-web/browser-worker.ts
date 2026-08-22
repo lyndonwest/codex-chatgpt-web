@@ -86,6 +86,7 @@ export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+export const CHATGPT_GITHUB_CONNECTOR_NAME = "GitHub";
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -1315,20 +1316,24 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  private selectedConnectorControl(composer: Locator): Locator {
+  private selectedConnectorControl(composer: Locator, connectorName: string): Locator {
     return composer
       .locator('[data-id^="plugin:"][data-keyword]')
-      .filter({ hasText: this.config.appName, visible: true });
+      .filter({ hasText: connectorName, visible: true });
   }
 
-  private async connectorIsSelected(composer: Locator): Promise<boolean> {
-    const selected = this.selectedConnectorControl(composer);
-    const keywords = await selected.evaluateAll(elements => (
-      elements.map(element => element.getAttribute("data-keyword"))
-    ));
-    const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
+  private async connectorIsSelected(composer: Locator, connectorName: string): Promise<boolean> {
+    const selected = this.selectedConnectorControl(composer, connectorName);
+    const exactMatches = await selected.evaluateAll((elements, expected) => {
+      const target = expected.toLowerCase();
+      return elements.filter(element => {
+        const keyword = (element.getAttribute("data-keyword") ?? "").trim().toLowerCase();
+        const text = (element.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+        return keyword === target || text === target || text.startsWith(`${target} `);
+      }).length;
+    }, connectorName);
     if (exactMatches > 1) {
-      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
+      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(connectorName)} connector selections`);
     }
     return exactMatches === 1;
   }
@@ -1364,28 +1369,47 @@ export class ChatGptBrowserWorker {
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     catalogRefreshAvailable = false,
+    connectorName = this.config.appName,
+    preserveExisting = false,
   ): Promise<Locator> {
     let composer = await this.activeComposer(page);
-    await composer.fill("");
-    if (await this.connectorIsSelected(composer)) {
+    if (!preserveExisting) await composer.fill("");
+    if (await this.connectorIsSelected(composer, connectorName)) {
       await captureDiagnostic?.("connector-already-selected");
       return composer;
     }
 
     const menuRows = page.locator('.__menu-item[tabindex="0"]');
     const appResult = menuRows.filter({
-      has: page.getByText(this.config.appName, { exact: true }),
+      has: page.getByText(connectorName, { exact: true }),
     });
     const menuDeadline = Date.now() + 20_000;
+    const mentionTrigger = connectorName === this.config.appName
+      ? "@c"
+      : `@${connectorName.slice(0, 1).toLowerCase()}`;
+    const mentionFailure = async (triggerAttempts: number): Promise<string> => {
+      if (connectorName === this.config.appName) {
+        return await this.connectorMentionFailure(menuRows, triggerAttempts);
+      }
+      const titles = await this.connectorMentionRowTitles(menuRows);
+      if (titles.length === 0) {
+        return `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`;
+      }
+      return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(connectorName)}`
+        + ` after ${triggerAttempts} complete mention trigger attempt(s)`
+        + `; make that app available in ChatGPT before retrying`
+        + `; visible rows: ${titles.map(title => JSON.stringify(title)).join(", ")}`;
+    };
     let triggerAttempts = 0;
     let firstMenuCaptured = false;
     for (;;) {
       triggerAttempts += 1;
       composer = await this.activeComposer(page);
-      await composer.fill("");
+      if (!preserveExisting) await composer.fill("");
       await composer.focus();
+      if (preserveExisting) await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
       await settleChatGptUi();
-      await composer.pressSequentially("@c", { delay: 25 });
+      await composer.pressSequentially(mentionTrigger, { delay: 25 });
       if (!firstMenuCaptured) {
         firstMenuCaptured = true;
         await captureDiagnostic?.("connector-mention-triggered");
@@ -1400,41 +1424,41 @@ export class ChatGptBrowserWorker {
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         const visibleRows = await this.connectorMentionRowTitles(menuRows);
-        const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
+        const knownIdentityMismatch = connectorName === this.config.appName
+          && this.config.appName === CHATGPT_CONNECTOR_NAME
           && (
             visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
             || LEGACY_CHATGPT_CONNECTOR_NAMES.some(name => visibleRows.includes(name))
           );
         if (knownIdentityMismatch) {
           await captureDiagnostic?.("connector-menu-missing");
-          throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
+          throw new Error(await mentionFailure(triggerAttempts));
         }
         if (Date.now() >= menuDeadline) {
-          if (catalogRefreshAvailable && visibleRows.length > 0) {
-            if (!visibleRows.includes(this.config.appName)) {
-              throw new ChatGptConnectorCatalogStaleError(
-                this.config.appName,
-                visibleRows,
-                triggerAttempts,
-              );
-            }
+          if (catalogRefreshAvailable && visibleRows.length > 0 && !visibleRows.includes(connectorName)) {
+            throw new ChatGptConnectorCatalogStaleError(
+              connectorName,
+              visibleRows,
+              triggerAttempts,
+            );
           }
           await captureDiagnostic?.("connector-menu-missing");
-          throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
+          throw new Error(await mentionFailure(triggerAttempts));
+        }
+        if (preserveExisting) {
+          await composer.press("Escape").catch(() => {});
+          for (let index = 0; index < mentionTrigger.length; index += 1) {
+            await composer.press("Backspace").catch(() => {});
+          }
         }
       }
     }
     if (await appResult.count() !== 1) {
       throw new Error(
-        `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
+        `ChatGPT connector menu did not expose one exact ${JSON.stringify(connectorName)} row`
         + `; visible rows: ${(await this.connectorMentionRowTitles(menuRows)).map(title => JSON.stringify(title)).join(", ")}`,
       );
     }
-    // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
-    // reach this menu. Unlike the old unguarded composer Enter path, require the exact row to own
-    // ChatGPT's keyboard highlight first; otherwise move the menu highlight until it does. Keep
-    // focus on the composer, activate through the menu's real keyboard owner, then prove the exact
-    // selected connector pill below.
     const rowHighlighted = async () => await appResult.getAttribute("data-highlighted") !== null;
     if (!await rowHighlighted()) {
       const visibleRowCount = await menuRows.filter({ visible: true }).count();
@@ -1443,23 +1467,19 @@ export class ChatGptBrowserWorker {
       }
     }
     if (!await rowHighlighted()) {
-      throw new Error(`ChatGPT connector menu could not highlight ${JSON.stringify(this.config.appName)}`);
+      throw new Error(`ChatGPT connector menu could not highlight ${JSON.stringify(connectorName)}`);
     }
     await page.keyboard.press("Enter");
     await captureDiagnostic?.("connector-choice-activated");
-    // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
-    // again instead of returning the pre-selection locator, otherwise the real turn can focus a
-    // detached/hidden editor even though verification just succeeded.
     const selectedComposer = await this.activeComposer(page);
-    const selectedConnector = this.selectedConnectorControl(selectedComposer);
+    const selectedConnector = this.selectedConnectorControl(selectedComposer, connectorName);
     await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
-    if (!await this.connectorIsSelected(selectedComposer)) {
-      throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
+    if (!await this.connectorIsSelected(selectedComposer, connectorName)) {
+      throw new Error(`ChatGPT composer did not select ${JSON.stringify(connectorName)} connector`);
     }
     await captureDiagnostic?.("connector-selected");
     return selectedComposer;
   }
-
   private async attachPrompt(
     page: Page,
     prompt: string,
@@ -1471,20 +1491,31 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     if (!localTools) {
       const composer = await this.activeComposer(page);
-      // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-      // then transport the complete text in one CDP Input.insertText command.
+      // Preserve upstream browser-only and compaction behavior: no connectors are attached.
       await composer.fill("");
       await composer.focus();
       await this.insertPromptText(page, prompt, abortSignal);
       await this.assertPromptAttached(page, prompt, abortSignal);
       return;
     }
-    const selectedComposer = await this.selectConnector(
+
+    let selectedComposer = await this.selectConnector(
       page,
       captureDiagnostic,
       catalogRefreshAvailable,
+      this.config.appName,
     );
+    selectedComposer = await this.selectConnector(
+      page,
+      captureDiagnostic,
+      false,
+      CHATGPT_GITHUB_CONNECTOR_NAME,
+      true,
+    );
+    if (!await this.connectorIsSelected(selectedComposer, this.config.appName)
+      || !await this.connectorIsSelected(selectedComposer, CHATGPT_GITHUB_CONNECTOR_NAME)) {
+      throw new Error("ChatGPT composer did not preserve Native2 and GitHub connector selections");
+    }
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
     await this.insertPromptText(page, ` ${prompt}`, abortSignal);
